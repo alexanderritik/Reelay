@@ -153,3 +153,29 @@ This does not exist yet; the old `cmd/bench` measured editor seeking. Write `cmd
 | Ladder: one job per chunk for all rungs, or one job per chunk per rung | One job per chunk (decode once). Revisit once GPU workers exist |
 | tus: library or hand-rolled | tusd's handler |
 | License | MIT for the most adoption, or AGPL-3.0 to stop a closed hosted fork. Decide before the first public post |
+
+
+Why the code alone won't get attention
+
+The category is crowded and the problem is mostly solved. Mux, Cloudflare Stream, Bunny Stream and api.video already sell "upload a video, get HLS back." YC partners will ask why anyone would switch, and "it's open source" or "it's self-hosted" isn't enough of an answer by itself.
+You're right about AI. Claude and ChatGPT can now produce a working ffmpeg-to-HLS pipeline in a weekend, so code is no longer the moat. What's still scarce is the stuff AI doesn't hand you: users who depend on it, reliability under real load, knowing which problem is painful enough that people pay, and getting it in front of them.
+YC funds traction and insight, not repos. A solo technical founder with 20 paying users and a sharp thesis beats a beautiful codebase with zero users almost every time.
+What would get attention
+Pick one wedge where the big players are weak and prove people want it:
+
+Cost. Mux and similar services get expensive at scale. "Run it on a €40 Hetzner box and pay 10× less" is a real pitch to bootstrapped SaaS founders, edtech and course platforms. Back it up with a cost calculator and benchmarks.
+Data control and compliance. Healthcare, legal, government and EU companies that can't send video to a US SaaS. Self-hosting is a feature they actually pay for.
+AI-native video. This is where the excitement is right now. Video infrastructure built for AI apps and agents: transcripts, semantic search across footage, auto-clipping, an API an agent can call. "Mux for AI products" is a much stronger story than "open-source Mux."
+The engineering itself, as a story. Your chunked fan-out with fencing (stale workers can't overwrite current output) and the chaos console are more interesting than the average video API. A post like "how I made distributed transcoding crash-safe" can do well on Hacker News, and HN attention brings users, which brings YC interest.
+What I'd do next
+
+Finish the S3 storage phase. Without it, "scale to many machines" is a promise rather than a feature.
+Write the README for one specific customer, not for everyone.
+Launch on HN ("Show HN") and r/selfhosted, then get 10 real users and talk to them.
+Apply to YC with whatever traction and learning you have. The application rewards evidence that you can find a wedge and move fast.
+
+A live public demo link. localhost doesn't count; host it on a small VPS.
+The GIF: upload, kill the worker, the video still finishes and plays.
+A short write-up of the browser bug. Technical founders share stories like that.
+One real user, even a friend's site.
+A message under 80 words that names their pipeline problem and links the demo.
