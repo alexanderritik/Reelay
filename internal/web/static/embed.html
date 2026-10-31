@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Video</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: #fff; }
+  video { width: 100%; height: 100%; display: block; background: #000; }
+  .wait {
+    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; text-align: center; padding: 16px; background-size: cover; background-position: center;
+  }
+  .wait::before { content: ""; position: absolute; inset: 0; background: rgba(8, 8, 14, .7); backdrop-filter: blur(12px); }
+  .wait > * { position: relative; }
+  .wait[hidden] { display: none; }
+  .spin { width: 34px; height: 34px; border-radius: 50%; border: 3px solid rgba(255,255,255,.2); border-top-color: #fff; animation: r 1s linear infinite; }
+  .wait.failed .spin { display: none; }
+  .wait span { color: rgba(255,255,255,.7); font-size: 13px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+</style>
+</head>
+<body>
+<video id="v" controls playsinline preload="metadata"></video>
+<div class="wait" id="wait"><div class="spin"></div><strong id="msg">Loading…</strong><span id="sub"></span></div>
+<script src="/static/vendor/hls.min.js"></script>
+<script>
+"use strict";
+const id = location.pathname.split("/").filter(Boolean).pop();
+const video = document.getElementById("v"), wait = document.getElementById("wait");
+let attached = false;
+
+function attach(v) {
+  attached = true;
+  video.poster = v.thumbnail_url;
+  if (v.format === "mp4") { video.src = v.play_url; return; }
+  if (window.Hls && Hls.isSupported()) {
+    const hls = new Hls({ startPosition: 0 });
+    hls.loadSource(v.play_url);
+    hls.attachMedia(video);
+  } else {
+    video.src = v.play_url;
+  }
+}
+
+async function tick() {
+  let v;
+  try {
+    const res = await fetch(`/videos/${encodeURIComponent(id)}`);
+    if (res.status === 404) return show("Video not found", "", true);
+    v = await res.json();
+  } catch {
+    return setTimeout(tick, 3000);
+  }
+  document.title = v.title;
+  wait.style.backgroundImage = `url("${v.thumbnail_url}")`;
+  if (v.playable) { wait.hidden = true; if (!attached) attach(v); return; }
+  if (v.status === "failed") return show("This video could not be processed", "", true);
+  show("Processing…", v.progress > 0 ? `${Math.floor(v.progress)}% done. Playback starts automatically.` : "Starting soon.");
+  setTimeout(tick, 2000);
+}
+
+function show(msg, sub, failed) {
+  wait.hidden = false;
+  wait.classList.toggle("failed", !!failed);
+  document.getElementById("msg").textContent = msg;
+  document.getElementById("sub").textContent = sub;
+}
+
+tick();
+</script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+# Build output
+/reelay
+
+# Local media and outputs
+/data/
+
+# Local test videos in the repo root
+/*.mp4
+/*.mov

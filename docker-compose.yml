@@ -1,0 +1,57 @@
+# docker compose up            → dashboard and API on http://localhost:8080
+# docker compose up -d postgres → only the database, for running reelay with `go run`
+name: reelay
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: reelay-postgres
+    environment:
+      POSTGRES_USER: reelay
+      POSTGRES_PASSWORD: reelay
+      POSTGRES_DB: reelay
+    ports:
+      - "5435:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reelay"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  api:
+    build: .
+    command: serve
+    environment:
+      DATABASE_URL: postgres://reelay:reelay@postgres:5432/reelay
+      # Set this when serving behind a domain, so returned URLs use it.
+      PUBLIC_URL: ${PUBLIC_URL:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      - media:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Workers share the media volume with the API (local storage). Scale with
+  # `docker compose up --scale worker=4`.
+  worker:
+    build: .
+    command: worker
+    environment:
+      DATABASE_URL: postgres://reelay:reelay@postgres:5432/reelay
+    volumes:
+      - media:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: 2
+
+volumes:
+  pgdata:
+  media:

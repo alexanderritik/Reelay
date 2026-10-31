@@ -1,0 +1,743 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Conduit Chaos Console</title>
+<style>
+:root {
+  --bg: #f6f6f4; --panel: #ffffff; --ink: #1c1c1a; --muted: #6b6b66; --line: #e2e1dc;
+  --accent: #3b5bdb; --ok: #2b8a3e; --bad: #c92a2a; --warn: #b7791f; --info: #1971c2;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141413; --panel: #1d1d1b; --ink: #ecebe6; --muted: #9a9993; --line: #2f2e2b;
+    --accent: #748ffc; --ok: #51cf66; --bad: #ff6b6b; --warn: #fcc419; --info: #4dabf7;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 8px 20px; align-items: baseline; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 17px; margin: 0; }
+header .meta { color: var(--muted); font-size: 13px; display: flex; gap: 16px; flex-wrap: wrap; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+.dot.ok { background: var(--ok); } .dot.bad { background: var(--bad); }
+main { display: grid; grid-template-columns: minmax(0, 440px) minmax(0, 1fr); gap: 16px; padding: 16px 20px; }
+@media (max-width: 1000px) { main { grid-template-columns: 1fr; padding: 16px; } }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 14px; margin-bottom: 16px; }
+section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+button { font: inherit; font-size: 13px; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); cursor: pointer; }
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: default; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--bad); }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.scenario { border-top: 1px solid var(--line); padding: 10px 0; display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; }
+.scenario:first-of-type { border-top: 0; padding-top: 0; }
+.scenario .title { font-weight: 600; }
+.scenario .expect { color: var(--muted); font-size: 13px; grid-column: 1; }
+.scenario .result { grid-column: 1 / -1; font-size: 13px; }
+.badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 10px; border: 1px solid currentColor; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; }
+.pass, .s-done { color: var(--ok); } .fail, .s-failed { color: var(--bad); }
+.run, .s-running { color: var(--info); } .s-validating { color: var(--accent); } .s-queued { color: var(--warn); }
+.s-paused, .s-frozen { color: var(--warn); } .s-waiting { color: var(--info); } .s-exited { color: var(--muted); }
+#log { font: 12px/1.5 var(--mono); max-height: 320px; overflow: auto; margin: 0; white-space: pre-wrap; word-break: break-word; }
+#log .t { color: var(--muted); } #log .e { color: var(--bad); } #log .k { color: var(--ok); }
+input[type=text] { font: inherit; font-size: 13px; padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); width: 160px; }
+.workers { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 10px; }
+.worker { border: 1px solid var(--line); border-radius: 6px; padding: 10px; min-width: 0; }
+.worker.exited { opacity: .55; }
+.worker .head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; }
+.worker .name { font-weight: 700; font-family: var(--mono); }
+.worker .sub { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.worker pre { font: 11px/1.45 var(--mono); background: var(--bg); border-radius: 4px; padding: 6px; height: 150px; overflow: auto; margin: 6px 0 0; white-space: pre-wrap; word-break: break-all; }
+.lv-WARN { color: var(--warn); } .lv-ERROR { color: var(--bad); }
+.empty { color: var(--muted); font-size: 13px; }
+.tablewrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+td.mono { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+td.err { color: var(--muted); font-size: 12px; max-width: 420px; }
+tr.focus td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.lease { display: inline-block; width: 60px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
+.lease i { display: block; height: 100%; background: var(--ok); }
+.lease i.low { background: var(--bad); }
+.prog { display: inline-block; width: 90px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; vertical-align: middle; margin-right: 6px; }
+.prog i { display: block; height: 100%; background: var(--info); transition: width .4s ease; }
+.prog i.v { background: var(--accent); } .prog i.d { background: var(--ok); }
+td.prog-cell { white-space: nowrap; font-size: 12px; font-variant-numeric: tabular-nums; }
+video { max-width: 100%; border-radius: 6px; margin-top: 8px; }
+.strip { display: flex; flex-wrap: wrap; gap: 3px; padding: 2px 0 4px; }
+.cell { min-width: 30px; height: 22px; padding: 0 4px; border-radius: 4px; font: 10px/22px var(--mono); text-align: center; color: #fff; background: var(--muted); }
+.cell.queued { background: var(--line); color: var(--muted); } .cell.running { background: var(--info); }
+.cell.validating { background: var(--accent); } .cell.done { background: var(--ok); } .cell.failed { background: var(--bad); }
+.cell.retried { outline: 2px solid var(--warn); outline-offset: -2px; }
+tr.strip-row td { border-bottom: 1px solid var(--line); padding-top: 0; }
+.note { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Conduit · Chaos Console</h1>
+  <div class="meta">
+    <span id="db"><span class="dot"></span>database</span>
+    <span id="lease">lease —</span>
+    <span id="sample">sample: not loaded</span>
+  </div>
+</header>
+
+<main>
+  <div>
+    <section>
+      <h2>Failure scenarios <button class="primary" id="runAll">Run all</button></h2>
+      <div id="scenarios"></div>
+    </section>
+    <section>
+      <h2>Run log <button id="clearLog">Clear</button></h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+
+  <div>
+    <section>
+      <h2>Manual controls</h2>
+      <div class="row">
+        <button id="spawn">+ Worker</button>
+        <button id="spawnFaulty" title="CONDUIT_CHAOS=truncate-proxy">+ Truncating worker</button>
+        <button id="spawnFreeze" title="CONDUIT_CHAOS=freeze-before-commit">+ Freeze-before-commit worker</button>
+        <button id="resetWorkers" class="danger">Kill all workers</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="text" id="idem" placeholder="Idempotency-Key (optional)">
+        <button id="upload">Submit job</button>
+        <button id="upload2">Submit twice at once</button>
+        <button id="uploadLong" title="120 s sample: split into 10 s chunks plus audio">Submit long (chunked)</button>
+        <label class="note" style="margin:0"><input type="file" id="file" accept="video/*"> use my own video</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="dbRestart">Restart Postgres</button>
+        <button id="dbStop" class="danger">Stop Postgres</button>
+        <button id="dbStart">Start Postgres</button>
+        <button id="cancelActive" class="danger">Cancel unfinished jobs</button>
+      </div>
+    </section>
+
+    <section>
+      <h2>Workers</h2>
+      <div class="workers" id="workers"></div>
+    </section>
+
+    <section>
+      <h2>Jobs <span class="note" style="margin:0;text-transform:none;letter-spacing:0">newest first</span></h2>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>job</th><th>state</th><th>progress</th><th>fence</th><th>attempt</th><th>owner</th><th>lease</th><th>last error / output</th></tr></thead>
+          <tbody id="jobs"></tbody>
+        </table>
+      </div>
+      <div id="player"></div>
+    </section>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js"></script>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+let st = { workers: [], jobs: [], children: {}, lease_ttl_ms: 10000 };
+let clockSkew = 0;     // server clock minus browser clock
+let focusJob = null;   // highlighted in the table
+let busy = false;      // a scenario is running
+let sampleBlob = null;
+let longBlob = null;
+let hlsPlayer = null; // the hls.js instance playing a chunked proxy
+
+// ---------- server calls ----------
+async function call(method, path, body, headers) {
+  const res = await fetch(path, { method, body, headers });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${method} ${path}: ${res.status}`);
+  return { status: res.status, data };
+}
+const post = (path) => call("POST", path).then((r) => r.data);
+
+async function refresh() {
+  try {
+    const { data } = await call("GET", "/state");
+    st = data;
+    clockSkew = new Date(data.now) - Date.now();
+  } catch (e) {
+    st.db_error = "console unreachable: " + e.message;
+  }
+  render();
+  return st;
+}
+
+async function videoBlob(long) {
+  if (long) {
+    if (!longBlob) {
+      $("sample").textContent = "long sample: generating…";
+      const res = await fetch("/sample?long=1");
+      if (!res.ok) throw new Error("long sample: " + (await res.text()));
+      longBlob = await res.blob();
+      $("sample").textContent = `long sample: ${(longBlob.size / 1e6).toFixed(0)} MB, 120 s 1080p`;
+    }
+    return longBlob;
+  }
+  const f = $("file").files[0];
+  if (f) return f;
+  if (!sampleBlob) {
+    $("sample").textContent = "sample: generating…";
+    const res = await fetch("/sample");
+    if (!res.ok) throw new Error("sample: " + (await res.text()));
+    sampleBlob = await res.blob();
+    $("sample").textContent = `sample: ${(sampleBlob.size / 1e6).toFixed(0)} MB, 60 s 1080p`;
+  }
+  return sampleBlob;
+}
+
+async function submit(idemKey, long) {
+  const fd = new FormData();
+  fd.append("file", await videoBlob(long), "video.mp4");
+  const headers = idemKey ? { "Idempotency-Key": idemKey } : undefined;
+  const r = await call("POST", "/api/jobs", fd, headers);
+  focusJob = r.data.id;
+  return { status: r.status, job: r.data };
+}
+
+// ---------- helpers for scenarios ----------
+const L = () => st.lease_ttl_ms;
+const allJobs = () => st.jobs.concat(...Object.values(st.children || {}));
+const jobById = (id) => allJobs().find((j) => j.id === id);
+const kidsOf = (id) => (st.children || {})[id] || [];
+const chunkName = (j) => j.kind === "chunk" ? `chunk ${j.chunk_index}` : j.kind === "audio" ? "audio" : short(j.id);
+// A chunked job can play once its audio (if any) and chunk 0 are committed.
+const playable = (id) => {
+  const kids = kidsOf(id);
+  const c0 = kids.find((k) => k.kind === "chunk" && k.chunk_index === 0);
+  return c0 && c0.state === "done" && kids.filter((k) => k.kind === "audio").every((k) => k.state === "done");
+};
+const ownerOf = (j) => j && j.lease_owner ? st.workers.find((w) => j.lease_owner.includes(`-${w.pid}-`)) : null;
+const short = (id) => id.slice(0, 8);
+// A freeze-before-commit worker stops itself; the console only sees it in the log.
+const isFrozen = (w) => w.status === "running" &&
+  w.logs.findLastIndex((l) => l.includes("chaos: freezing before commit")) > w.logs.findLastIndex((l) => l.includes("chaos: resumed"));
+
+function log(msg, cls) {
+  const t = new Date().toLocaleTimeString();
+  $("log").insertAdjacentHTML("beforeend", `<span class="t">${t}</span> <span class="${cls || ""}">${esc(msg)}</span>\n`);
+  $("log").scrollTop = $("log").scrollHeight;
+}
+
+async function waitFor(what, fn, timeoutMs) {
+  log("waiting: " + what);
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    await refresh();
+    if (!st.db_error) {
+      const v = fn();
+      if (v) return v;
+    }
+    await sleep(250);
+  }
+  throw new Error("timed out waiting for " + what);
+}
+
+function expect(cond, msg) { if (!cond) throw new Error("expectation failed: " + msg); }
+
+async function cleanSlate() {
+  await post("/workers/reset");
+  const { cancelled } = await post("/jobs/cancel-active");
+  if (cancelled) log(`cancelled ${cancelled} unfinished job(s) from earlier runs`);
+}
+
+async function spawn(n, fault) {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(await post("/workers" + (fault ? "?fault=" + fault : "")));
+  log(`started ${out.map((w) => `${w.name} (pid ${w.pid}${fault ? ", " + fault : ""})`).join(", ")}`);
+  await sleep(300);
+  return out;
+}
+
+async function submitAndCatchRunning() {
+  const { job } = await submit();
+  log(`submitted job ${short(job.id)}`);
+  const j = await waitFor(`job ${short(job.id)} to be running`, () => {
+    const j = jobById(job.id);
+    if (j && (j.state === "done" || j.state === "validating")) throw new Error("job finished before it could be interrupted; use a longer video");
+    return j && j.state === "running" && ownerOf(j) ? j : null;
+  }, 30000);
+  const w = ownerOf(j);
+  log(`${w.name} owns ${short(j.id)} with fence ${j.fence}`);
+  await sleep(1500); // let ffmpeg get going
+  return { id: job.id, fence: j.fence, w };
+}
+
+const done = (id) => () => { const j = jobById(id); if (j && j.state === "failed") throw new Error("job failed: " + j.last_error); return j && j.state === "done" ? j : null; };
+
+// ---------- scenarios (the README failure table) ----------
+const scenarios = [
+  {
+    title: "Kill worker mid-transcode",
+    expect: "Lease expires, another worker reclaims, job ends done",
+    async run() {
+      await spawn(2);
+      const { id, fence, w } = await submitAndCatchRunning();
+      await refresh();
+      const at = jobById(id).progress;
+      await post(`/workers/${w.name}/kill`);
+      log(`SIGKILL ${w.name} at ${at.toFixed(0)}% — no heartbeat, no cleanup`, "e");
+      const j = await waitFor("lease expiry, reclaim and done", done(id), 3 * L() + 60000);
+      expect(j.fence > fence, "a new claim raised the fence");
+      expect(j.output_key.endsWith(`/${j.fence}.mp4`), "output is the new owner's file");
+      return `${w.name} killed at fence ${fence} (${at.toFixed(0)}% transcoded); lease expired, job reclaimed at fence ${j.fence} and done (attempt ${j.attempts}/${j.max_attempts}).`;
+    },
+  },
+  {
+    title: "Pause worker past its lease, then resume",
+    expect: "Its late commit is rejected by the fence",
+    async run() {
+      const [a] = await spawn(1, "freeze-before-commit");
+      const { job } = await submit();
+      log(`submitted job ${short(job.id)}`);
+      const j1 = await waitFor(`${a.name} to validate its proxy and freeze just before committing`, () => {
+        const w = st.workers.find((x) => x.name === a.name);
+        return w && isFrozen(w) ? jobById(job.id) : null;
+      }, 60000);
+      const fence = j1.fence;
+      log(`${a.name} frozen (SIGSTOP) holding fence ${fence} and a valid proxy — its lease will run out`, "e");
+      const [b] = await spawn(1);
+      const j2 = await waitFor(`lease expiry, then ${b.name} to reclaim and commit`, () => {
+        const j = done(job.id)();
+        return j && j.fence > fence ? j : null;
+      }, 3 * L() + 60000);
+      log(`${b.name} committed at fence ${j2.fence}; resuming ${a.name}, which still thinks it owns fence ${fence}`);
+      await post(`/workers/${a.name}/resume`);
+      const pattern = new RegExp(`(commit rejected|commit outcome unknown).*fence=${fence}\\b`);
+      const line = await waitFor(`${a.name}'s late commit`, () => {
+        const w = st.workers.find((x) => x.name === a.name);
+        return w && w.logs.find((l) => pattern.test(l));
+      }, 15000);
+      log(`${a.name}: ${line.replace(/^time=\S+ /, "")}`, "k");
+      const j = jobById(job.id);
+      expect(j.state === "done" && j.fence === j2.fence, "job unchanged by the stale write");
+      expect(j.output_key === j2.output_key && j.output_key.endsWith(`/${j2.fence}.mp4`), "output still the current owner's proxy");
+      expect(!line.includes("commit outcome unknown"),
+        `job stayed correct, but ${a.name}'s commit never reached the database (its commit timeout ran out during the freeze), so the fence was not exercised and its proxy was kept as an orphan`);
+      return `${a.name} froze before committing fence ${fence}; ${b.name} reclaimed and finished at fence ${j2.fence}. On resume, ${a.name}'s commit matched 0 rows and was discarded; job still points at ${j.output_key}.`;
+    },
+  },
+  {
+    title: "Worker produces a broken or short file",
+    expect: "Validation catches it; job retried, never done",
+    async run() {
+      const [bad] = await spawn(1, "truncate-proxy");
+      const { job } = await submit();
+      log(`submitted job ${short(job.id)}`);
+      const j1 = await waitFor("the faulty attempt to be rejected", () => {
+        const j = jobById(job.id);
+        expect(!j || j.state !== "done", "a truncated proxy never reaches done");
+        return j && j.last_error && j.state !== "running" && j.state !== "validating" ? j : null;
+      }, L() + 60000);
+      await post(`/workers/${bad.name}/kill`);
+      log(`rejected: ${j1.last_error}`, "k");
+      expect(/invalid proxy/.test(j1.last_error), "the failure came from validation");
+      await spawn(1);
+      const j = await waitFor("a healthy worker to retry it", done(job.id), 2 * L() + 60000);
+      return `Truncated proxy rejected by validation (${j1.last_error.replace(/^attempt \d+ of \d+: /, "").slice(0, 90)}…); healthy retry → done at attempt ${j.attempts}.`;
+    },
+  },
+  {
+    title: "Same job dispatched twice",
+    expect: "Only one result committed",
+    async run() {
+      await spawn(2);
+      const key = "chaos-dup-" + Math.random().toString(36).slice(2, 10);
+      log(`two concurrent uploads with Idempotency-Key ${key}`);
+      const [a, b] = await Promise.all([submit(key), submit(key)]);
+      log(`responses: ${a.status} ${short(a.job.id)}, ${b.status} ${short(b.job.id)}`);
+      expect(a.job.id === b.job.id, "both requests got the same job");
+      expect([a.status, b.status].sort().join() === "200,201", "one created (201), one replayed (200)");
+      const j = await waitFor("the job to finish", done(a.job.id), 2 * L() + 60000);
+      expect(st.jobs.filter((x) => x.idempotency_key === key).length === 1, "one row for the key");
+      expect(j.fence === 1 && j.attempts === 1, "claimed exactly once");
+      return `Both requests mapped to job ${short(j.id)} (201 + 200); claimed once (fence 1), one proxy committed.`;
+    },
+  },
+  {
+    title: "Database restart mid-run",
+    expect: "Jobs resume from stored state",
+    async run() {
+      await spawn(2);
+      const { id, fence, w } = await submitAndCatchRunning();
+      log("docker restart postgres…", "e");
+      const { took_ms } = await post("/db/restart");
+      log(`postgres back after ${(took_ms / 1000).toFixed(1)} s`);
+      const j = await waitFor("the job to finish", done(id), 3 * L() + 60000);
+      const how = j.fence === fence ? `${w.name} rode it out and committed with fence ${fence}` : `lease lapsed; reclaimed at fence ${j.fence}`;
+      return `Postgres restarted while ${w.name} was transcoding (${(took_ms / 1000).toFixed(1)} s outage); ${how}. Job done.`;
+    },
+  },
+  {
+    title: "Job fails every attempt",
+    expect: "Ends failed after max retries, with the reason",
+    async run() {
+      await spawn(1, "truncate-proxy");
+      const { job } = await submit();
+      log(`submitted job ${short(job.id)} to a worker that always breaks its output`);
+      const j = await waitFor("all attempts to fail", () => {
+        const j = jobById(job.id);
+        expect(!j || j.state !== "done", "never done");
+        return j && j.state === "failed" ? j : null;
+      }, 4 * L() + 120000);
+      expect(j.attempts === j.max_attempts, "every attempt was used");
+      expect(/invalid proxy/.test(j.last_error || ""), "reason recorded");
+      return `Failed after ${j.attempts}/${j.max_attempts} attempts with backoff. Reason: ${j.last_error.slice(0, 120)}`;
+    },
+  },
+  // ---------- chunked proxies: a long source fans out into chunk + audio jobs ----------
+  {
+    title: "Chunked: playback starts before the job finishes",
+    expect: "The playlist is playable once audio and chunk 0 commit, and grows as chunks commit",
+    async run() {
+      await spawn(3);
+      const { job } = await submit(undefined, true);
+      const t0 = Date.now();
+      log(`submitted long job ${short(job.id)} to 3 workers`);
+      await waitFor("audio and chunk 0 to commit", () => playable(job.id), 120000);
+      const tPlay = (Date.now() - t0) / 1000;
+      const kids = kidsOf(job.id);
+      const n = kids.filter((k) => k.kind === "chunk").length;
+      const doneThen = kids.filter((k) => k.kind === "chunk" && k.state === "done").length;
+      log(`playable after ${tPlay.toFixed(1)} s with ${doneThen}/${n} chunks in — starting the player`, "k");
+      playHLS(job.id);
+      const j = await waitFor("every chunk and the finalize step", done(job.id), 300000);
+      const tDone = (Date.now() - t0) / 1000;
+      expect(tPlay < tDone, "playable before done");
+      expect(kidsOf(job.id).every((k) => k.fence === 1), "no child needed a retry");
+      return `Fanned out into ${n} chunks + audio. Playable after ${tPlay.toFixed(1)} s (${doneThen}/${n} chunks in); all chunks and seam validation done after ${tDone.toFixed(1)} s (root fence ${j.fence}: planned, then finalized).`;
+    },
+  },
+  {
+    title: "Chunked: kill worker mid-chunk",
+    expect: "Only that chunk is redone; the others keep their first result; job done",
+    async run() {
+      await spawn(3);
+      const { job } = await submit(undefined, true);
+      log(`submitted long job ${short(job.id)}`);
+      const victim = await waitFor("a chunk 30% transcoded", () =>
+        kidsOf(job.id).find((k) => k.kind === "chunk" && k.state === "running" && k.progress >= 30 && ownerOf(k)), 120000);
+      const w = ownerOf(victim);
+      await post(`/workers/${w.name}/kill`);
+      log(`SIGKILL ${w.name} at ${victim.progress.toFixed(0)}% of ${chunkName(victim)} (fence ${victim.fence})`, "e");
+      await spawn(1);
+      await waitFor("lease expiry, retry of that chunk, then done", done(job.id), 3 * L() + 300000);
+      const kids = kidsOf(job.id);
+      const again = kids.find((k) => k.id === victim.id);
+      expect(again.fence === victim.fence + 1, `${chunkName(victim)} redone once`);
+      const others = kids.filter((k) => k.id !== victim.id);
+      expect(others.every((k) => k.fence === 1), "no other child was redone");
+      return `${w.name} killed during ${chunkName(victim)}; only it was redone (fence ${again.fence}); the other ${others.length} children kept their first result; seams validated, job done.`;
+    },
+  },
+  {
+    title: "Chunked: one child fails every attempt",
+    expect: "Root and every unfinished sibling end failed, citing the child",
+    async run() {
+      await spawn(1, "truncate-proxy");
+      const { job } = await submit(undefined, true);
+      log(`submitted long job ${short(job.id)} to a worker that breaks every output`);
+      const j = await waitFor("the graph to fail", () => {
+        const j = jobById(job.id);
+        expect(!j || j.state !== "done", "never done");
+        return j && j.state === "failed" ? j : null;
+      }, 6 * L() + 300000);
+      const kids = kidsOf(job.id);
+      expect(kids.every((k) => k.state === "failed"), "every child failed");
+      const cancelled = kids.filter((k) => (k.last_error || "").startsWith("cancelled: ")).length;
+      expect(/(chunk \d+|audio) failed/.test(j.last_error || ""), "root names the failing child");
+      return `Root failed: "${(j.last_error || "").slice(0, 90)}…"; ${cancelled} unfinished siblings cancelled in the same transaction.`;
+    },
+  },
+  {
+    title: "Chunked: kill worker while planning chunks",
+    expect: "No children are left behind; the next owner plans exactly once",
+    async run() {
+      const [a] = await spawn(1, "crash-during-plan");
+      const { job } = await submit(undefined, true);
+      log(`submitted long job ${short(job.id)} to ${a.name}, which kills itself before writing the plan`);
+      await waitFor(`${a.name} to crash mid-plan`, () => st.workers.find((w) => w.name === a.name && w.status === "exited"), 60000);
+      expect(kidsOf(job.id).length === 0, "the crashed planner left no children");
+      log(`${a.name} died: the plan transaction never committed, so no chunk jobs exist`, "e");
+      await spawn(2);
+      const j = await waitFor("lease expiry, a fresh plan, every chunk, then done", done(job.id), 3 * L() + 300000);
+      const kids = kidsOf(job.id);
+      expect(kids.length === j.chunks + 1, "planned exactly once");
+      return `${a.name} was killed after splitting the source, before writing the plan: no children existed. Its lease expired; the next worker planned once (${j.chunks} chunks + audio) and the job finished at fence ${j.fence}.`;
+    },
+  },
+  {
+    title: "Chunked: kill worker while checking the seams",
+    expect: "Only the final check reruns; no chunk is redone",
+    async run() {
+      const [a] = await spawn(1, "crash-during-finalize");
+      const { job } = await submit(undefined, true);
+      log(`submitted long job ${short(job.id)} to ${a.name}, which kills itself during the final seam check`);
+      await waitFor(`${a.name} to encode every chunk, then crash mid-check`, () => st.workers.find((w) => w.name === a.name && w.status === "exited"), 600000);
+      const crashed = jobById(job.id);
+      expect(crashed.state === "validating", "root was mid-check when the worker died");
+      log(`${a.name} died with the root validating at fence ${crashed.fence}; all ${kidsOf(job.id).length} children already committed`, "e");
+      await spawn(1);
+      const j = await waitFor("lease expiry and a rerun of the check", done(job.id), 3 * L() + 60000);
+      expect(kidsOf(job.id).every((k) => k.fence === 1), "no chunk was redone");
+      expect(j.fence === crashed.fence + 1, "the root was claimed once more");
+      return `${a.name} was killed mid-check (fence ${crashed.fence}); after its lease expired only the check reran (fence ${j.fence}); all ${kidsOf(job.id).length} children kept their first result.`;
+    },
+  },
+];
+
+const results = scenarios.map(() => null);
+
+function renderScenarios() {
+  $("scenarios").innerHTML = scenarios.map((s, i) => {
+    const r = results[i];
+    const badge = !r ? "" : `<span class="badge ${r.cls}">${r.label}</span>`;
+    return `<div class="scenario">
+      <div><div class="title">${i + 1}. ${esc(s.title)} ${badge}</div><div class="expect">Expected: ${esc(s.expect)}</div></div>
+      <div><button data-run="${i}" ${busy ? "disabled" : ""}>Run</button></div>
+      ${r && r.text ? `<div class="result ${r.cls}">${esc(r.text)}</div>` : ""}
+    </div>`;
+  }).join("");
+  $("runAll").disabled = busy;
+}
+
+async function runScenario(i) {
+  const s = scenarios[i];
+  results[i] = { cls: "run", label: "running" };
+  renderScenarios();
+  log(`━━ ${i + 1}. ${s.title}`);
+  const t0 = Date.now();
+  try {
+    await cleanSlate();
+    const text = await s.run();
+    results[i] = { cls: "pass", label: "pass", text: `${text} (${((Date.now() - t0) / 1000).toFixed(0)} s)` };
+    log("PASS: " + text, "k");
+  } catch (e) {
+    results[i] = { cls: "fail", label: "fail", text: e.message };
+    log("FAIL: " + e.message, "e");
+  }
+  renderScenarios();
+  return results[i].cls === "pass";
+}
+
+async function exclusive(fn) {
+  if (busy) return;
+  busy = true; renderScenarios();
+  try { await fn(); } finally { busy = false; renderScenarios(); }
+}
+
+$("scenarios").addEventListener("click", (e) => {
+  const i = e.target.dataset.run;
+  if (i !== undefined) exclusive(() => runScenario(+i));
+});
+$("runAll").onclick = () => exclusive(async () => {
+  let passed = 0;
+  for (let i = 0; i < scenarios.length; i++) passed += await runScenario(i);
+  await post("/workers/reset");
+  log(`━━ ${passed}/${scenarios.length} scenarios passed`, passed === scenarios.length ? "k" : "e");
+});
+$("clearLog").onclick = () => { $("log").innerHTML = ""; };
+
+// ---------- manual controls ----------
+const manual = (fn) => async () => {
+  try { await fn(); } catch (e) { log(e.message, "e"); }
+  refresh();
+};
+$("spawn").onclick = manual(() => spawn(1));
+$("spawnFaulty").onclick = manual(() => spawn(1, "truncate-proxy"));
+$("spawnFreeze").onclick = manual(() => spawn(1, "freeze-before-commit"));
+$("resetWorkers").onclick = manual(async () => { await post("/workers/reset"); log("killed all workers"); });
+$("upload").onclick = manual(async () => {
+  const r = await submit($("idem").value.trim());
+  log(`submit → ${r.status} job ${short(r.job.id)}`);
+});
+$("uploadLong").onclick = manual(async () => {
+  const r = await submit(undefined, true);
+  log(`submit long → ${r.status} job ${short(r.job.id)} (chunked)`);
+});
+$("upload2").onclick = manual(async () => {
+  const key = $("idem").value.trim() || "manual-" + Math.random().toString(36).slice(2, 10);
+  const rs = await Promise.all([submit(key), submit(key)]);
+  log(`twice with key ${key} → ${rs.map((r) => `${r.status} ${short(r.job.id)}`).join(", ")}`);
+});
+for (const a of ["restart", "stop", "start"]) {
+  $("db" + a[0].toUpperCase() + a.slice(1)).onclick = manual(async () => {
+    log(`postgres ${a}…`);
+    const { took_ms } = await post("/db/" + a);
+    log(`postgres ${a} done in ${(took_ms / 1000).toFixed(1)} s`);
+  });
+}
+$("cancelActive").onclick = manual(async () => {
+  const { cancelled } = await post("/jobs/cancel-active");
+  log(`cancelled ${cancelled} job(s)`);
+});
+$("workers").addEventListener("click", async (e) => {
+  const { name, act } = e.target.dataset;
+  if (!act) return;
+  try { await post(`/workers/${name}/${act}`); log(`${act} ${name}`); } catch (err) { log(err.message, "e"); }
+  refresh();
+});
+$("jobs").addEventListener("click", (e) => {
+  const { play, hls } = e.target.dataset;
+  if (!play && !hls) return;
+  e.preventDefault();
+  if (hls) return playHLS(hls);
+  stopHLS();
+  $("player").innerHTML = `<video controls autoplay muted src="/files/${esc(play)}"></video><div class="note">${esc(play)}</div>`;
+});
+
+function stopHLS() { if (hlsPlayer) { hlsPlayer.destroy(); hlsPlayer = null; } }
+
+// playHLS plays a chunked proxy while it is still being made: hls.js keeps
+// polling the EVENT playlist and appends chunks as they commit.
+function playHLS(id) {
+  stopHLS();
+  const url = `/api/jobs/${id}/hls/master.m3u8`;
+  $("player").innerHTML = `<video id="hlsVideo" controls autoplay muted></video><div class="note">HLS ${esc(url)} · grows as chunks commit</div>`;
+  const video = $("hlsVideo");
+  if (window.Hls && Hls.isSupported()) {
+    // An EVENT playlist without ENDLIST looks live, and hls.js would start
+    // at the live edge; an editor starts at the beginning.
+    hlsPlayer = new Hls({ startPosition: 0 });
+    hlsPlayer.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) log(`player: ${d.type} ${d.details}`, "e"); });
+    hlsPlayer.loadSource(url);
+    hlsPlayer.attachMedia(video);
+  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+    video.src = url; // Safari plays HLS natively
+  } else {
+    log("this browser cannot play HLS (hls.js did not load)", "e");
+  }
+}
+
+// ---------- rendering ----------
+const logScroll = {};
+function renderWorkers() {
+  const el = $("workers");
+  el.querySelectorAll("pre[data-name]").forEach((p) => {
+    logScroll[p.dataset.name] = p.scrollHeight - p.scrollTop - p.clientHeight < 8 ? "bottom" : p.scrollTop;
+  });
+  if (!st.workers.length) { el.innerHTML = `<div class="empty">No workers. Start one, or run a scenario.</div>`; return; }
+  el.innerHTML = st.workers.map((w) => {
+    const job = allJobs().find((j) => ownerOf(j) === w && (j.state === "running" || j.state === "validating"));
+    const live = w.status !== "exited";
+    const status = isFrozen(w) ? "frozen" : w.status;
+    const btn = (act, label, show, cls) => show ? `<button data-name="${w.name}" data-act="${act}" class="${cls || ""}">${label}</button>` : "";
+    const lines = w.logs.slice(-120).map((l) => {
+      const lv = (l.match(/level=(\w+)/) || [])[1];
+      return `<span class="lv-${lv}">${esc(l.replace(/^time=\S+ /, "").replace(/ worker=\S+/, ""))}</span>`;
+    }).join("\n");
+    return `<div class="worker ${live ? "" : "exited"}">
+      <div class="head"><span class="name">${w.name}</span>
+        <span>${w.fault ? `<span class="badge fail">${esc(w.fault)}</span> ` : ""}<span class="badge s-${status}">${status}</span></span></div>
+      <div class="sub">pid ${w.pid}${job ? ` · ${job.state} ${chunkName(job)}${job.parent_id ? " of " + short(job.parent_id) : ""} (fence ${job.fence})${job.state === "running" ? ` · ${job.progress.toFixed(0)}%` : ""}` : live ? " · idle" : ` · ${esc(w.exit)}`}</div>
+      <div class="row">
+        ${btn("kill", "Kill", live, "danger")}
+        ${btn("pause", "Pause", status === "running")}
+        ${btn("resume", "Resume", status === "paused" || status === "frozen")}
+        ${btn("stop", "Stop gracefully", live)}
+      </div>
+      <pre data-name="${w.name}">${lines}</pre>
+    </div>`;
+  }).join("");
+  el.querySelectorAll("pre[data-name]").forEach((p) => {
+    const s = logScroll[p.dataset.name];
+    p.scrollTop = s === undefined || s === "bottom" ? p.scrollHeight : s;
+  });
+}
+
+// Progress of the current attempt. Running jobs stop at 99% until the fenced
+// commit lands; a queued job shows its backoff instead.
+function progressCell(j, now) {
+  if (j.state === "queued") {
+    const wait = new Date(j.available_at) - now;
+    return wait > 0 ? `retry in ${(wait / 1000).toFixed(1)} s` : (j.attempts ? "waiting to retry" : "waiting");
+  }
+  if (j.state === "failed") return "";
+  const p = j.state === "done" ? 100 : j.progress;
+  const cls = j.state === "done" ? "d" : j.state === "validating" ? "v" : "";
+  const label = j.state === "validating" ? "validating" : `${p.toFixed(0)}%`;
+  return `<span class="prog"><i class="${cls}" style="width:${p}%"></i></span>${label}`;
+}
+
+// A chunked job's progress is its committed children over all children.
+function graphProgress(j) {
+  const kids = kidsOf(j.id);
+  const done = kids.filter((k) => k.state === "done").length;
+  const p = j.state === "done" ? 100 : (100 * done) / Math.max(1, kids.length);
+  const label = j.state === "waiting" ? `${done}/${kids.length} parts` : j.state === "validating" ? "seams" : j.state === "done" ? "100%" : j.state;
+  return `<span class="prog"><i class="${j.state === "done" ? "d" : ""}" style="width:${p}%"></i></span>${label}`;
+}
+
+// One box per child: audio first, then chunks in order; an outline marks a
+// child that needed more than one claim.
+function chunkStrip(j) {
+  const kids = kidsOf(j.id).slice().sort((a, b) => (a.kind === "audio" ? -1 : b.kind === "audio" ? 1 : a.chunk_index - b.chunk_index));
+  const cells = kids.map((k) => {
+    const o = ownerOf(k);
+    const tip = `${chunkName(k)} · ${k.state} · fence ${k.fence} · attempt ${k.attempts}/${k.max_attempts}${o ? " · " + o.name : ""}${k.last_error ? " · " + k.last_error : ""}`;
+    const text = k.kind === "audio" ? "aud" : k.chunk_index;
+    // A running child fills from the left as it encodes.
+    const fill = k.state === "running" ? ` style="background:linear-gradient(to right, var(--info) ${k.progress}%, color-mix(in srgb, var(--info) 35%, var(--line)) ${k.progress}%)"` : "";
+    const pct = k.state === "running" && k.progress > 0 ? ` ${k.progress.toFixed(0)}%` : "";
+    return `<span class="cell ${k.state} ${k.fence > 1 ? "retried" : ""}" title="${esc(tip)}"${fill}>${text}${k.fence > 1 ? "·f" + k.fence : ""}${pct}</span>`;
+  }).join("");
+  return `<tr class="strip-row"><td></td><td colspan="7"><div class="strip">${cells}</div></td></tr>`;
+}
+
+function renderJobs() {
+  const now = Date.now() + clockSkew;
+  $("jobs").innerHTML = st.jobs.map((j) => {
+    const chunked = j.chunks != null;
+    const o = ownerOf(j);
+    let lease = "";
+    if (j.lease_expires_at) {
+      const left = new Date(j.lease_expires_at) - now;
+      const pct = Math.max(0, Math.min(100, (left / L()) * 100));
+      lease = `<span class="lease"><i class="${pct < 34 ? "low" : ""}" style="width:${pct}%"></i></span>${left > 0 ? (left / 1000).toFixed(1) + " s" : "expired"}`;
+    }
+    let detail = j.state === "done"
+      ? `<a href="#" data-play="${esc(j.output_key)}">▶ ${esc(j.output_key)}</a>${j.last_error ? `<br>${esc(j.last_error)}` : ""}`
+      : esc(j.last_error || "");
+    if (chunked && j.state !== "failed" && playable(j.id)) {
+      detail = `<a href="#" data-hls="${j.id}">▶ HLS${j.state === "done" ? "" : " (live, still encoding)"}</a>`;
+    }
+    return `<tr class="${j.id === focusJob ? "focus" : ""}">
+      <td class="mono" title="${j.id}">${short(j.id)}${j.idempotency_key ? " 🔑" : ""}</td>
+      <td><span class="badge s-${j.state}">${j.state}</span></td>
+      <td class="prog-cell">${chunked ? graphProgress(j) : progressCell(j, now)}</td>
+      <td class="mono">${j.fence}</td>
+      <td class="mono">${j.attempts}/${j.max_attempts}</td>
+      <td class="mono">${o ? o.name : j.lease_owner ? "?" : ""}</td>
+      <td class="mono">${lease}</td>
+      <td class="err">${detail}</td>
+    </tr>${chunked ? chunkStrip(j) : ""}`;
+  }).join("") || `<tr><td colspan="8" class="empty">No jobs yet.</td></tr>`;
+}
+
+function render() {
+  $("db").innerHTML = `<span class="dot ${st.db_error ? "bad" : "ok"}"></span>${st.db_error ? "database: " + esc(st.db_error).slice(0, 80) : "database ok"}`;
+  $("lease").textContent = `lease ${(L() / 1000).toFixed(0)} s · workers pinned to 1 core`;
+  renderWorkers();
+  renderJobs();
+}
+
+renderScenarios();
+(async function poll() { if (!busy) await refresh(); setTimeout(poll, 500); })();
+</script>
+</body>
+</html>
