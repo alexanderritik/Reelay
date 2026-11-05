@@ -17,7 +17,8 @@ curl localhost:8080/videos/3f0c…
 ## Why it exists
 
 - **Crash-safe processing.** Every encode step holds a lease and a fencing token in Postgres. A worker that dies or freezes is replaced, and its late writes are rejected. A suite of 14 failure scenarios runs real workers against real Postgres and ffmpeg to prove it ([docs/ENGINE.md](docs/ENGINE.md)).
-- **Plays while it encodes.** Every video is served as HLS. Long videos are split into chunks that encode in parallel, and playback starts as soon as the first chunk is done.
+- **Plays smoothly on any connection.** Every video is served as adaptive HLS at 360p, 720p and 1080p (never upscaled), so the player picks the quality the viewer's connection can hold.
+- **Plays while it encodes.** Long videos are split into chunks that encode in parallel, and playback starts as soon as the first chunk is done.
 - **Every output is checked before it counts.** Frame counts, keyframes, seams and audio length are verified before a video is marked ready.
 - **Your servers, one command.** `docker compose up` starts the API, the dashboard, workers and Postgres.
 
@@ -30,7 +31,7 @@ Reelay is early. What works today and what is next:
 | ✅ Upload API with idempotent retries | ✅ Dashboard: upload, status, live chunk map, player, embed snippets |
 | ✅ HLS for every video, playable while processing | ✅ Embeddable player at `/embed/{id}` |
 | ✅ Poster thumbnails | ✅ `docker compose up` |
-| 🔜 Resumable uploads (tus) | 🔜 360p / 720p / 1080p adaptive ladder |
+| ✅ 360p / 720p / 1080p adaptive ladder, never upscaled | 🔜 Resumable uploads (tus) |
 | 🔜 Webhooks on ready / failed | 🔜 Hover previews (storyboard) |
 | 🔜 Auto captions (Whisper) | 🔜 Workers on many machines, GPU encoding |
 
@@ -65,15 +66,15 @@ Needs Go 1.26+ and ffmpeg on the machine that runs workers.
 | `GET /videos/{id}/thumbnail.jpg` | Poster frame, available right after upload |
 | `GET /embed/{id}` | A player page for an `<iframe>` |
 
-A video's `status` is `processing`, `ready` or `failed`. `playable` turns true as soon as `play_url` works, which for long videos is well before `ready`. `play_url` is always an HLS `master.m3u8`. A failed video has an `error` saying why.
+A video's `status` is `processing`, `ready` or `failed`. `playable` turns true as soon as `play_url` works, which for long videos is well before `ready`. `play_url` is always an HLS `master.m3u8` with one variant per rung, and `renditions` lists them (for example `["360p", "720p"]`). A failed video has an `error` saying why.
 
-Settings (environment variables): `DATABASE_URL`, `DATA_DIR`, `ADDR`, `PUBLIC_URL` (base for returned URLs behind a proxy), and the worker settings in [docs/ENGINE.md](docs/ENGINE.md#running-it).
+Settings (environment variables): `DATABASE_URL`, `DATA_DIR`, `ADDR`, `PUBLIC_URL` (base for returned URLs behind a proxy), and the worker settings in [docs/ENGINE.md](docs/ENGINE.md#running-it), including `LADDER` for the quality ladder.
 
 ## Honest limits
 
 - No authentication yet. Run it on a private network or behind your own auth proxy.
 - Storage is local disk, so the API and all workers must share one volume (one machine, or a shared mount). S3-compatible storage is planned.
-- One output rendition today (540p H.264). The adaptive ladder is next.
+- H.264 only. Each chunk is encoded at every rung, which costs more CPU than one rendition; there is no throughput benchmark yet.
 - Throughput numbers ("good for up to X videos a day on one machine") come after the claim benchmark in [PLAN.md](PLAN.md).
 
 ## How it is built

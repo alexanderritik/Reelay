@@ -72,14 +72,14 @@ Short videos take the single-file MP4 path today ([internal/worker/chunked.go](i
 - **Product:** `play_url` is always HLS and `format` is always `"hls"`. Remove `GET /videos/{id}/video.mp4` and the MP4 branches in the dashboard (`internal/web/static/app.js`) and the README.
 **Done when:** every `play_url` is a `master.m3u8`, a 3-second clip and a 2-hour file both play in `/embed/{id}`, and `go run ./cmd/chaos` passes.
 
-### 2. Quality ladder: 360p, 720p, 1080p *(engine)*
+### 2. Quality ladder: 360p, 720p, 1080p *(engine)* ✅ (done 6 Nov 2026)
 - Each chunk job encodes **all rungs in one ffmpeg run** (decode once, `split` filter, one output per rung). This costs less than one job per rung per chunk, and a retry still redoes only one chunk.
-- Never upscale: rungs above the source height are skipped. A 720p source gets 360p and 720p.
+- Never upscale: rungs above the source's short side are skipped. A 720p source gets 360p and 720p; a source between rungs (478p) also gets a rung at its own size. Portrait video is laddered by its short side.
 - Capped CRF per rung (`-crf 23 -maxrate/-bufsize`): roughly 360p at 0.8 Mbps, 720p at 2.8 Mbps, 1080p at 5 Mbps.
-- Storage: `proxies/<root>/v/<rung>/<chunk>/<fence>/…`. The child's `hls` column becomes a map from rung to media.
+- Storage: `proxies/<root>/v/<chunk>/<fence>/<rung>/…`, so every rung of a chunk sits under the chunk's own prefix: one fenced commit publishes them together and one prefix delete cleans up a failed attempt. The child's `hls` column lists the renditions.
 - Master playlist: one `EXT-X-STREAM-INF` per rung with `RESOLUTION`, a `BANDWIDTH` measured from the real segments, and `CODECS`.
 - Validation checks every rung (frames, keyframes, `tfdt`). A missing or short rung fails the chunk.
-- Ladder settings live in the product config and are passed to the engine as a list of rendition specs.
+- Ladder settings: the `LADDER` env var (`360:800k,720:2800k,1080:5000k`), passed to the engine as rendition specs.
 - Dashboard: show which rungs a video has.
 **Done when:** hls.js switches rungs under DevTools throttling, and a chaos scenario that truncates one rung is caught.
 

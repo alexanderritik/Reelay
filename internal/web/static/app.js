@@ -568,6 +568,7 @@ function detailView(id) {
       ["Source", [v.source_height ? `${v.source_height}p` : "", fmtBytes(v.size_bytes)].filter(Boolean).join(" · ")],
       ["File", v.filename || "—"],
       ["Playback", v.format === "hls" ? "HLS (fMP4)" : "—"],
+      ["Qualities", v.renditions?.length ? v.renditions.join(" · ") : "—"],
       ["Uploaded", new Date(v.created_at).toLocaleString()],
       ["Video ID", `<span class="mono" title="${esc(v.id)}">${esc(v.id)}</span>`, true],
     ];

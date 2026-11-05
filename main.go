@@ -108,6 +108,13 @@ func runWorker(ctx context.Context, log *slog.Logger) error {
 	if cfgErr != nil {
 		return cfgErr
 	}
+	if v := os.Getenv("LADDER"); v != "" {
+		ladder, err := media.ParseLadder(v)
+		if err != nil {
+			return fmt.Errorf("LADDER: %w", err)
+		}
+		w.Proxy.Ladder = ladder
+	}
 	if w.ChunkSeconds%w.Proxy.KeyframeInterval != 0 {
 		return fmt.Errorf("CHUNK_SECONDS: %v is not a multiple of the %v keyframe interval",
 			w.ChunkSeconds, w.Proxy.KeyframeInterval)

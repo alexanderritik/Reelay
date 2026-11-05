@@ -64,6 +64,7 @@ type Video struct {
 	Playable     bool      `json:"playable"`         // play_url works now, possibly before ready
 	Format       string    `json:"format,omitempty"` // "hls", once planned
 	PlayURL      string    `json:"play_url,omitempty"`
+	Renditions   []string  `json:"renditions,omitempty"` // quality ladder, lowest first, e.g. ["360p", "720p"]
 	ThumbnailURL string    `json:"thumbnail_url"`
 	EmbedURL     string    `json:"embed_url"`
 	Duration     *float64  `json:"duration,omitempty"` // seconds
@@ -104,7 +105,7 @@ func (s *Server) view(r *http.Request, v row) Video {
 	out := Video{
 		ID: v.ID, Title: v.Title, Filename: v.Filename,
 		Status: v.status(), Progress: math.Round(v.progress()*10) / 10,
-		Playable: playable, Format: format,
+		Playable: playable, Format: format, Renditions: v.Renditions,
 		ThumbnailURL: base + "/thumbnail.jpg",
 		EmbedURL:     s.base(r) + "/embed/" + v.ID,
 		Duration:     v.Duration, SourceHeight: v.SourceHeight, SizeBytes: v.SizeBytes,

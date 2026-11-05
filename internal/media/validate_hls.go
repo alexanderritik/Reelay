@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/alexanderritik/reelay/internal/hls"
@@ -64,30 +65,91 @@ func probeTrack(ctx context.Context, path string) (track, proxyInfo, *InvalidErr
 	return t, p, nil
 }
 
-// ValidateChunk checks one chunk's stored rendition against its plan:
-//   - h264 yuv420p at the proxy height, video only
+// ChunkOutput locates a chunk's stored renditions on local disk.
+type ChunkOutput struct {
+	Dir string     // the chunk's output directory: one subdirectory per rendition
+	HLS hls.Output // what the chunk published
+}
+
+func (c ChunkOutput) playlist(r hls.Rendition) string {
+	return filepath.Join(c.Dir, r.Name, PlaylistName)
+}
+
+func renditionNames(rs []hls.Rendition) []string {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = r.Name
+	}
+	return names
+}
+
+func rungNames(rs []Rung) []string {
+	names := make([]string, len(rs))
+	for i, r := range rs {
+		names[i] = r.Name()
+	}
+	return names
+}
+
+// checkRungs reports a chunk whose renditions are not exactly the ladder the
+// source should get: a missing rung would leave a player switching into a
+// hole, and an unexpected one was made with a different ladder.
+func checkRungs(bad func(string, ...any), got []hls.Rendition, want []Rung) bool {
+	if g, w := renditionNames(got), rungNames(want); !slices.Equal(g, w) {
+		bad("renditions %v, want %v (a rung is missing or unexpected)", g, w)
+		return false
+	}
+	return true
+}
+
+// prefixed returns a bad func that labels every problem with name.
+func prefixed(bad func(string, ...any), name string) func(string, ...any) {
+	return func(format string, args ...any) { bad(name+": "+format, args...) }
+}
+
+// ValidateChunk checks one chunk's stored renditions against its plan. It
+// must have exactly the rungs spec.LadderFor picks for the source, and each
+// of them must be:
+//   - h264 yuv420p with the rung's short side, video only
 //   - exactly the planned number of frames, every one inside [start, end)
-//   - timestamps strictly increase in decode order (no B-frames, no
+//   - timestamps strictly increasing in decode order (no B-frames, no
 //     duplicates), so the chunk is exactly the planned run of source frames
-//   - it starts on a keyframe and no keyframe gap exceeds the interval + 1 frame
-func ValidateChunk(ctx context.Context, src, playlist string, spec ProxySpec, start, end float64, frames int) error {
+//   - starting on a keyframe, with no keyframe gap over the interval + 1 frame
+//   - placed where ffprobe says it is in a browser too (checkBrowserTimeline)
+func ValidateChunk(ctx context.Context, src string, c ChunkOutput, spec ProxySpec, start, end float64, frames int) error {
 	s, err := probeSource(ctx, src)
 	if err != nil {
 		return fmt.Errorf("probe source: %w", err)
 	}
-	t, p, invalid := probeTrack(ctx, playlist)
-	if invalid != nil {
-		return invalid
-	}
-
 	var problems []string
 	bad := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 
-	checkFormat(bad, t.stream, min(spec.Height, s.height))
+	want := spec.LadderFor(s.short())
+	if checkRungs(bad, c.HLS.Renditions, want) {
+		for i, r := range c.HLS.Renditions {
+			checkChunkRendition(ctx, prefixed(bad, r.Name), c.playlist(r), want[i].Height, spec, start, end, frames)
+		}
+	}
+	if len(problems) > 0 {
+		return &InvalidError{problems}
+	}
+	return nil
+}
+
+func checkChunkRendition(ctx context.Context, bad func(string, ...any), playlist string, short int,
+	spec ProxySpec, start, end float64, frames int,
+) {
+	t, p, invalid := probeTrack(ctx, playlist)
+	if invalid != nil {
+		for _, msg := range invalid.Problems {
+			bad("%s", msg)
+		}
+		return
+	}
+	checkFormat(bad, t.stream, short)
 	if p.audio != nil {
 		bad("chunk has an audio stream; audio is encoded separately")
 	}
-
 	if len(t.pkts) != frames {
 		bad("%d frames, planned %d (frames lost or duplicated)", len(t.pkts), frames)
 	}
@@ -106,11 +168,6 @@ func ValidateChunk(ctx context.Context, src, playlist string, spec ProxySpec, st
 	}
 	checkKeyframeGaps(bad, t, spec)
 	checkBrowserTimeline(bad, playlist, t)
-
-	if len(problems) > 0 {
-		return &InvalidError{problems}
-	}
-	return nil
 }
 
 // ValidateAudio checks the stored audio rendition: AAC, as long as the
@@ -141,37 +198,67 @@ func ValidateAudio(ctx context.Context, src, playlist string) error {
 	return nil
 }
 
-// ValidateAssembly checks the committed chunks, in order, as one proxy:
-//   - their frames add up to the source's (sourceFrames)
+// ValidateAssembly checks the committed chunks, in order, as one video. Every
+// chunk must have the same renditions, the ladder the source should get,
+// and each rendition on its own must be seamless:
+//   - its frames add up to the source's (sourceFrames)
 //   - each chunk starts exactly where the previous one ended: no gap and no
 //     overlap at any seam
 //   - keyframe spacing stays within the interval + 1 frame across seams
-//   - together they last as long as the source video, within one frame
-func ValidateAssembly(ctx context.Context, src string, chunkPlaylists []string, spec ProxySpec, sourceFrames int) error {
+//   - together the chunks last as long as the source video, within one frame
+func ValidateAssembly(ctx context.Context, src string, chunks []ChunkOutput, spec ProxySpec, sourceFrames int) error {
 	s, err := probeSource(ctx, src)
 	if err != nil {
 		return fmt.Errorf("probe source: %w", err)
 	}
-
 	var problems []string
 	bad := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
 
+	if len(chunks) == 0 {
+		return &InvalidError{[]string{"no chunks"}}
+	}
+	want := spec.LadderFor(s.short())
+	for i, c := range chunks {
+		checkRungs(prefixed(bad, fmt.Sprintf("chunk %d", i)), c.HLS.Renditions, want)
+	}
+	if len(problems) > 0 {
+		return &InvalidError{problems}
+	}
+	for ri, r := range chunks[0].HLS.Renditions {
+		playlists := make([]string, len(chunks))
+		for i, c := range chunks {
+			playlists[i] = c.playlist(c.HLS.Renditions[ri])
+		}
+		checkAssembly(ctx, prefixed(bad, r.Name), s, playlists, spec, sourceFrames)
+	}
+	if len(problems) > 0 {
+		return &InvalidError{problems}
+	}
+	return nil
+}
+
+// checkAssembly checks one rendition's chunk playlists, in order, as one.
+func checkAssembly(ctx context.Context, bad func(string, ...any), s sourceInfo, chunkPlaylists []string,
+	spec ProxySpec, sourceFrames int,
+) {
 	var tracks []track
-	total := 0
+	total, broken := 0, false
 	for i, pl := range chunkPlaylists {
 		t, _, invalid := probeTrack(ctx, pl)
 		if invalid != nil {
 			bad("chunk %d: %v", i, invalid)
+			broken = true
 			continue
 		}
 		checkBrowserTimeline(func(format string, args ...any) {
+			broken = true
 			bad("chunk %d: "+format, append([]any{i}, args...)...)
 		}, pl, t)
 		tracks = append(tracks, t)
 		total += len(t.pkts)
 	}
-	if len(problems) > 0 {
-		return &InvalidError{problems}
+	if broken {
+		return
 	}
 
 	if total != sourceFrames {
@@ -194,13 +281,8 @@ func ValidateAssembly(ctx context.Context, src string, chunkPlaylists []string, 
 	}
 	span := tracks[len(tracks)-1].end() - tracks[0].first()
 	if math.Abs(span-s.videoDur) > tracks[0].frame+tsEps {
-		bad("proxy lasts %.3fs, source %.3fs", span, s.videoDur)
+		bad("video lasts %.3fs, source %.3fs", span, s.videoDur)
 	}
-
-	if len(problems) > 0 {
-		return &InvalidError{problems}
-	}
-	return nil
 }
 
 // checkBrowserTimeline checks a rendition where a browser will place it, not
@@ -244,15 +326,17 @@ func checkBrowserTimeline(bad func(string, ...any), playlist string, t track) {
 	}
 }
 
-func checkFormat(bad func(string, ...any), v *stream, height int) {
+// checkFormat checks a rendition's codec and its short side, which is the
+// rung's size whichever way the video is turned.
+func checkFormat(bad func(string, ...any), v *stream, short int) {
 	if v.CodecName != "h264" {
 		bad("video codec %s, want h264", v.CodecName)
 	}
 	if v.PixFmt != "yuv420p" {
 		bad("pixel format %s, want yuv420p", v.PixFmt)
 	}
-	if v.Height != height {
-		bad("height %d, want %d", v.Height, height)
+	if got := min(v.Width, v.Height); got != short {
+		bad("%dx%d, want a short side of %d", v.Width, v.Height, short)
 	}
 }
 

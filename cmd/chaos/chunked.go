@@ -321,33 +321,38 @@ func crashDuringFinalize(ctx context.Context, h *harness) (string, error) {
 // validateGraphOutput checks a done chunk, audio or chunked root the way the
 // worker did before committing it, against what is in storage now.
 func (h *harness) validateGraphOutput(ctx context.Context, j jobs.Job, src string) error {
-	playlist := func(key string) (string, error) {
-		p := h.dataPath(key + "/" + media.PlaylistName)
-		if !exists(p) {
-			return "", fmt.Errorf("output %s missing", key)
+	stored := func(k jobs.Job) (media.ChunkOutput, error) {
+		if k.OutputKey == nil || k.HLS == nil {
+			return media.ChunkOutput{}, fmt.Errorf("%s is done without output", childName(k))
 		}
-		return p, nil
+		dir := h.dataPath(*k.OutputKey)
+		for _, f := range media.OutputFiles(*k.HLS) {
+			if !exists(filepath.Join(dir, filepath.FromSlash(f))) {
+				return media.ChunkOutput{}, fmt.Errorf("output %s/%s missing", *k.OutputKey, f)
+			}
+		}
+		return media.ChunkOutput{Dir: dir, HLS: *k.HLS}, nil
 	}
 	switch j.Kind {
 	case jobs.KindChunk:
-		p, err := playlist(*j.OutputKey)
+		c, err := stored(j)
 		if err != nil {
 			return err
 		}
-		return media.ValidateChunk(ctx, src, p, media.DefaultProxy, *j.RangeStart, *j.RangeEnd, *j.ExpectedFrames)
+		return media.ValidateChunk(ctx, src, c, media.DefaultProxy, *j.RangeStart, *j.RangeEnd, *j.ExpectedFrames)
 	case jobs.KindAudio:
-		p, err := playlist(*j.OutputKey)
+		c, err := stored(j)
 		if err != nil {
 			return err
 		}
-		return media.ValidateAudio(ctx, src, p)
+		return media.ValidateAudio(ctx, src, filepath.Join(c.Dir, media.PlaylistName))
 	}
 
 	kids, err := h.jobs.Children(ctx, j.ID)
 	if err != nil {
 		return err
 	}
-	var playlists []string
+	var chunks []media.ChunkOutput
 	for _, k := range kids {
 		if k.Kind != jobs.KindChunk {
 			continue
@@ -355,17 +360,17 @@ func (h *harness) validateGraphOutput(ctx context.Context, j jobs.Job, src strin
 		if k.State != jobs.StateDone {
 			return fmt.Errorf("root done but %s is %s", childName(k), k.State)
 		}
-		p, err := playlist(*k.OutputKey)
+		c, err := stored(k)
 		if err != nil {
 			return err
 		}
-		playlists = append(playlists, p)
+		chunks = append(chunks, c)
 	}
 	frames, err := media.SourceFrames(ctx, src)
 	if err != nil {
 		return err
 	}
-	return media.ValidateAssembly(ctx, src, playlists, media.DefaultProxy, len(frames))
+	return media.ValidateAssembly(ctx, src, chunks, media.DefaultProxy, len(frames))
 }
 
 // committedFile reports whether a stored proxy file belongs to a commit:

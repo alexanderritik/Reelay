@@ -15,7 +15,7 @@ import (
 	"github.com/alexanderritik/reelay/internal/jobs"
 )
 
-var testMedia = hls.Media{Init: "init.mp4", Segments: []hls.Segment{{URI: "seg_000.m4s", Duration: 2}}}
+var testMedia = hls.Output{Renditions: []hls.Rendition{{Name: "360p", Media: hls.Media{Init: "init.mp4", Segments: []hls.Segment{{URI: "seg_000.m4s", Duration: 2, Bytes: 1000}}}}}}
 
 func specs(n int) []jobs.ChunkSpec {
 	out := make([]jobs.ChunkSpec, n)

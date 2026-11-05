@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/alexanderritik/reelay/internal/hls"
 )
@@ -19,39 +20,71 @@ const PlaylistName = "index.m3u8"
 const segmentSeconds = hls.MinTargetDuration
 
 // TranscodeChunk encodes the video frames of src whose presentation time is
-// in [start, end) as an fMP4 HLS rendition in dir, and returns what it wrote.
-// Output timestamps are the source's own (-copyts), so chunks line up
-// end to end without any stitching. If onFrames is not nil it gets the
-// number of frames encoded so far, about twice a second; it must not block.
+// in [start, end) as one fMP4 HLS rendition per rung of the ladder that
+// spec.LadderFor picks for the source, each in its own subdirectory of dir
+// named after the rung, and returns what it wrote. The source is decoded
+// once and split to every rung in the same ffmpeg run, so a retry redoes the
+// whole chunk at every rung, never one rung alone.
 //
-// Compared with the single-file proxy, chunks also turn off B-frames: decode
-// order then equals display order, so a seam can never need a frame from the
-// previous chunk, and a scrubbing editor decodes fewer frames per seek. The
-// H.264 profile and level are pinned to match hls.VideoCodec.
-func TranscodeChunk(ctx context.Context, src, dir string, spec ProxySpec, start, end float64, onFrames func(int)) (hls.Media, error) {
+// Output timestamps are the source's own (-copyts), so chunks line up end to
+// end without any stitching. If onFrames is not nil it gets the number of
+// frames encoded so far, about four times a second; it must not block.
+//
+// Chunks have no B-frames: decode order then equals display order, so a seam
+// can never need a frame from the previous chunk. The H.264 profile and level
+// are pinned so each rung's CODECS string (Rung.Codecs) is exact.
+func TranscodeChunk(ctx context.Context, src, dir string, spec ProxySpec, start, end float64, onFrames func(int)) (hls.Output, error) {
+	s, err := probeSource(ctx, src)
+	if err != nil {
+		return hls.Output{}, err
+	}
+	rungs := spec.LadderFor(s.short())
+	if len(rungs) == 0 {
+		return hls.Output{}, fmt.Errorf("no rungs for a %dpx source (ladder %v)", s.short(), spec.Ladder)
+	}
+
 	ts := func(f float64) string { return strconv.FormatFloat(f, 'f', 6, 64) }
+	// Trim to exactly [start, end) on presentation timestamps, then split.
+	// Each rung scales its short side: width for portrait, height otherwise.
+	var graph strings.Builder
+	fmt.Fprintf(&graph, "[0:v:0]trim=start=%s:end=%s,split=%d", ts(start), ts(end), len(rungs))
+	for i := range rungs {
+		fmt.Fprintf(&graph, "[s%d]", i)
+	}
+	for i, r := range rungs {
+		fmt.Fprintf(&graph, ";[s%d]scale=w='if(gte(iw,ih),-2,%d)':h='if(gte(iw,ih),%d,-2)'[v%d]", i, r.Height, r.Height, i)
+	}
+
 	args := []string{
 		"-nostdin", "-hide_banner", "-loglevel", "error", "-y",
 		"-progress", "pipe:1", "-nostats",
 		"-stats_period", "0.25", // chunks are short: report often enough to show
-		// Seek to the keyframe at or before start (fast), keep source time,
-		// then trim to exactly [start, end) on presentation timestamps.
+		// Seek to the keyframe at or before start (fast) and keep source time.
 		"-noaccurate_seek", "-ss", ts(start), "-i", src, "-copyts",
-		"-map", "0:v:0", "-an",
-		"-vf", fmt.Sprintf("trim=start=%s:end=%s,scale=-2:'min(%d,ih)'", ts(start), ts(end), spec.Height),
-		"-fps_mode", "passthrough", // one output frame per source frame: counts must match the plan
-		"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-		"-profile:v", "high", "-level:v", "4.0", "-bf", "0",
-		"-pix_fmt", "yuv420p",
-		// t counts from the chunk's first frame, which sits on the grid.
-		"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%g)", spec.KeyframeInterval.Seconds()),
-		"-sc_threshold", "0",
+		"-filter_complex", graph.String(),
 	}
-	// frag_discont writes each fragment's tfdt from the source timestamps.
-	// Without it the muxer starts the media at 0 and records the offset in an
-	// edit list, which ffprobe honours but browsers ignore (see mp4box.go).
-	args = append(args, "-hls_segment_options", "movflags=+frag_discont")
-	args = append(args, hlsOutput(dir)...)
+	for i, r := range rungs {
+		rdir := filepath.Join(dir, r.Name())
+		if err := os.MkdirAll(rdir, 0o755); err != nil {
+			return hls.Output{}, err
+		}
+		args = append(args,
+			"-map", fmt.Sprintf("[v%d]", i), "-an",
+			"-fps_mode", "passthrough", // one output frame per source frame: counts must match the plan
+			"-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+			"-maxrate", strconv.Itoa(r.MaxRate), "-bufsize", strconv.Itoa(2*r.MaxRate),
+			"-profile:v", "high", "-level:v", r.level(), "-bf", "0",
+			"-pix_fmt", "yuv420p",
+			// t counts from the chunk's first frame, which sits on the grid.
+			"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%g)", spec.KeyframeInterval.Seconds()),
+			"-sc_threshold", "0",
+			// frag_discont writes each fragment's tfdt from the source timestamps.
+			// Without it the muxer starts the media at 0 and records the offset in
+			// an edit list, which ffprobe honours but browsers ignore (see mp4box.go).
+			"-hls_segment_options", "movflags=+frag_discont",
+		)
+		args = append(args, hlsOutput(rdir)...)
+	}
 
 	var report func(k, v string)
 	if onFrames != nil {
@@ -65,9 +98,26 @@ func TranscodeChunk(ctx context.Context, src, dir string, spec ProxySpec, start,
 		}
 	}
 	if err := runFFmpeg(ctx, args, report); err != nil {
-		return hls.Media{}, err
+		return hls.Output{}, err
 	}
-	return readPlaylist(dir)
+
+	var out hls.Output
+	for _, r := range rungs {
+		rdir := filepath.Join(dir, r.Name())
+		m, err := readPlaylist(rdir)
+		if err != nil {
+			return hls.Output{}, fmt.Errorf("%s: %w", r.Name(), err)
+		}
+		dims, err := ffprobe(ctx, filepath.Join(rdir, m.Init), "stream=width,height")
+		if err != nil || len(dims.Streams) == 0 {
+			return hls.Output{}, fmt.Errorf("%s: read dimensions: %v", r.Name(), err)
+		}
+		out.Renditions = append(out.Renditions, hls.Rendition{
+			Name: r.Name(), Width: dims.Streams[0].Width, Height: dims.Streams[0].Height,
+			Codecs: r.Codecs(), MaxRate: r.MaxRate, Media: m,
+		})
+	}
+	return out, nil
 }
 
 // TranscodeAudio writes the whole audio track of src as an fMP4 HLS
@@ -114,6 +164,8 @@ func hlsOutput(dir string) []string {
 	}
 }
 
+// readPlaylist reads the rendition ffmpeg wrote in dir, with each segment's
+// size, which the master playlist's bandwidth figures are measured from.
 func readPlaylist(dir string) (hls.Media, error) {
 	b, err := os.ReadFile(filepath.Join(dir, PlaylistName))
 	if err != nil {
@@ -122,6 +174,13 @@ func readPlaylist(dir string) (hls.Media, error) {
 	m, err := hls.Parse(string(b))
 	if err != nil {
 		return hls.Media{}, fmt.Errorf("ffmpeg playlist: %w", err)
+	}
+	for i, s := range m.Segments {
+		fi, err := os.Stat(filepath.Join(dir, s.URI))
+		if err != nil {
+			return hls.Media{}, err
+		}
+		m.Segments[i].Bytes = fi.Size()
 	}
 	return m, nil
 }
@@ -132,6 +191,22 @@ func Files(m hls.Media) []string {
 	files := []string{PlaylistName, m.Init}
 	for _, s := range m.Segments {
 		files = append(files, s.URI)
+	}
+	return files
+}
+
+// OutputFiles lists every file a child published, as slash-separated paths
+// relative to its output key: each rendition's files under its name, or a
+// single Media's files at the top.
+func OutputFiles(o hls.Output) []string {
+	if len(o.Renditions) == 0 {
+		return Files(o.Media)
+	}
+	var files []string
+	for _, r := range o.Renditions {
+		for _, f := range Files(r.Media) {
+			files = append(files, r.Name+"/"+f)
+		}
 	}
 	return files
 }

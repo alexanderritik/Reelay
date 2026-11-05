@@ -47,16 +47,16 @@ type Job struct {
 	UpdatedAt      time.Time  `json:"updated_at"`
 
 	// Chunked proxies (see graph.go). Zero values for the single-file path.
-	Kind           Kind       `json:"kind"`
-	ParentID       *string    `json:"parent_id,omitempty"`
-	ChunkIndex     *int       `json:"chunk_index,omitempty"`
-	RangeStart     *float64   `json:"range_start,omitempty"`
-	RangeEnd       *float64   `json:"range_end,omitempty"`
-	ExpectedFrames *int       `json:"expected_frames,omitempty"`
-	Priority       int        `json:"priority"`
-	Chunks         *int       `json:"chunks,omitempty"` // root: video chunks, once planned
-	PendingDeps    int        `json:"pending_deps"`
-	HLS            *hls.Media `json:"hls,omitempty"` // child: what its commit published
+	Kind           Kind        `json:"kind"`
+	ParentID       *string     `json:"parent_id,omitempty"`
+	ChunkIndex     *int        `json:"chunk_index,omitempty"`
+	RangeStart     *float64    `json:"range_start,omitempty"`
+	RangeEnd       *float64    `json:"range_end,omitempty"`
+	ExpectedFrames *int        `json:"expected_frames,omitempty"`
+	Priority       int         `json:"priority"`
+	Chunks         *int        `json:"chunks,omitempty"` // root: video chunks, once planned
+	PendingDeps    int         `json:"pending_deps"`
+	HLS            *hls.Output `json:"hls,omitempty"` // child: what its commit published
 }
 
 const columns = `id, state, source_key, output_key, fence, attempts, max_attempts,

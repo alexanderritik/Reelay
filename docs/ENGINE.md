@@ -4,7 +4,7 @@ Reelay runs on Conduit, a crash-safe video pipeline. It turns an uploaded video 
 
 Go, Postgres (pgx), ffmpeg/ffprobe through `os/exec`, and local disk storage.
 
-> This page describes the engine as it was first built: one 540p output, tuned for scrubbing in an editor. Reelay's `/videos` API sits on top of it unchanged. The quality ladder (360p/720p/1080p) and other product changes are planned in [PLAN.md](../PLAN.md).
+> This page describes the engine as it was first built for scrubbing in an editor, and the changes since: every video is chunked and played as HLS, and each chunk is encoded as a quality ladder (360p/720p/1080p, see [Quality ladder](#quality-ladder)). The single-file path still exists for the chaos suite. Product plans are in [PLAN.md](../PLAN.md).
 
 ## Failure tests
 
@@ -69,7 +69,18 @@ root again: finalize — validate the committed chunks as one proxy, then commit
 - **Failure spreads.** When a child runs out of attempts, the same transaction fails the root and every unfinished sibling. A sibling that is mid-transcode finds out on its next heartbeat, and its ffmpeg is killed.
 - **No waiting parent.** The root holds no lease while its children run, so a busy root can never occupy a worker that its own children need.
 - **Every frame lands in exactly one chunk.** Chunk ranges are half-open `[start, end)` on the source's own timestamps. Boundaries sit halfway between two frames, so rounding can never place a frame in two chunks or in none. Chunk lengths are multiples of the keyframe interval, so keyframes stay evenly spaced across seams.
+- **Every chunk is a quality ladder.** See [Quality ladder](#quality-ladder) below.
 - **Audio is never chunked.** Every AAC encode starts with a short silent lead-in, so joined chunks would click or drift at each seam. If the source's audio is already AAC-LC (as from phones and most cameras), it is copied, which takes 0.1 s for a 2-minute clip instead of 6.5 s to encode. That matters because playback cannot start until audio is in.
+
+### Quality ladder
+
+Each chunk job encodes every rung in **one ffmpeg run**: the source is decoded and trimmed once, `split` feeds one scaler and one H.264 encoder per rung, and each rung is written as its own fMP4 HLS rendition. A retry still redoes one chunk, at every rung.
+
+- **Rungs come from the source's short side**, so a portrait phone video gets the same rungs as a landscape one (ffmpeg rotates it upright; the rendition carries no rotation flag). The default ladder is 360p at 0.8 Mbit/s, 720p at 2.8 Mbit/s and 1080p at 5 Mbit/s (`-crf 23` under `-maxrate`, buffer twice that). Set it with `LADDER`.
+- **Never upscaled.** Rungs above the source are dropped. A source between two rungs gets one more rung at its own size, capped like the rung above it, unless it is within 20% of the rung below: 478p gets 360p and 478p, 400p gets only 360p, and 240p gets one 240p rendition.
+- **Pinned codecs.** H.264 High, level 4.0 up to 720p (`avc1.640028`) and 4.2 above it (`avc1.64002a`, which covers 1080p60), so each rung's `CODECS` string is exact.
+- **Storage keeps a chunk in one prefix:** `proxies/<root>/v/<chunk>/<fence>/<rung>/index.m3u8, init.mp4, seg_NNN.m4s`. One fenced commit publishes every rung together, and one prefix delete removes an attempt that did not commit. The child's `hls` column lists each rendition with its size, codec, bitrate cap and every segment's byte size.
+- **Validation checks every rung.** A chunk must have exactly the rungs its source should get. Each rung must have exactly the planned frames, start on a keyframe, keep the keyframe grid, have the rung's short side, and pass the browser-timeline check. Finalize checks seams rung by rung and rejects chunks whose rungs differ. A missing, short or truncated rung fails the chunk (`truncate-proxy` cuts the top rung in the chaos suite).
 
 ### Playback while encoding
 
@@ -77,14 +88,16 @@ The API serves HLS:
 
 | Endpoint | Contents |
 |---|---|
-| `/jobs/{id}/hls/master.m3u8` | Master playlist |
-| `/jobs/{id}/hls/video.m3u8` | `EVENT` playlist that grows as chunks commit |
+| `/jobs/{id}/hls/master.m3u8` | Master playlist: one variant per rung, lowest first |
+| `/jobs/{id}/hls/video_{rung}.m3u8` | One rung's `EVENT` playlist, which grows as chunks commit |
+| `/jobs/{id}/hls/video.m3u8` | The top rung (and videos from before the ladder) |
 | `/jobs/{id}/hls/audio.m3u8` | Audio playlist |
 | `/jobs/{id}/hls/…` | Segments, with immutable caching (every path carries its fence) |
 
 - **Playlists are built from the job table on every request, never stored.** Concurrent commits can't race to write a playlist file, and a segment is listed only after its fenced commit.
 - **The video playlist lists the committed chunks from chunk 0 up to the first gap.** This run only ever grows, which is what an `EVENT` playlist allows.
 - **Playback starts** once audio and chunk 0 have committed.
+- **Bandwidth is measured.** Each variant's `BANDWIDTH` is the higher of the peak segment bitrate measured so far and the rung's encoder cap, plus the audio; `AVERAGE-BANDWIDTH` is measured. Segments under 1 s are left out of the peak. `RESOLUTION` and `CODECS` come from the encoded rendition.
 - **Limit:** at high request rates the playlist rendering is the part to cache.
 
 **A bug found by testing in a real browser.** Every check passed, but chunks after the first played on top of chunk 0. The muxer had started each chunk's media at 0 and stored the real offset in an MP4 edit list. ffprobe applies edit lists; browsers' Media Source Extensions ignore them and place each fragment by its `tfdt`. The fix is `movflags=+frag_discont`. Validation now reads the fMP4 boxes directly ([mp4box.go](../internal/media/mp4box.go)) and rejects any chunk whose `tfdt` disagrees with its frames. Without the fix, the chunk tests fail with this check.
@@ -96,7 +109,7 @@ Every setting serves one goal: smooth scrubbing in a browser.
 | Setting | Choice | Why |
 |---|---|---|
 | Codec / container | H.264 (yuv420p) in MP4, or fMP4 HLS for chunked jobs | Decodes in every browser |
-| Resolution | 540p, never upscaled | Small enough to decode quickly while scrubbing |
+| Resolution | Chunked: the quality ladder above. Single-file: 540p. Never upscaled | Adaptive playback on any connection |
 | Keyframes | Every 1 s, fixed (`-force_key_frames`, `-sc_threshold 0`) | A seek never decodes more than 1 s; chunk boundaries line up with keyframes |
 | `+faststart` (single file) | Index (moov atom) at the front | Playback starts before the whole file downloads |
 | B-frames (chunks) | Off; H.264 High profile at level 4.0 | Decode order equals display order, so no seam depends on the previous chunk; the profile and level match the `CODECS` value in the master playlist |
@@ -163,6 +176,7 @@ Worker settings (environment variables):
 | `POLL_INTERVAL` | 1s | How often an idle worker looks for jobs |
 | `CHUNK_SECONDS` | 10s | Chunk length (a multiple of the 1 s keyframe interval) |
 | `CHUNK_MIN_DURATION` | 0 | Sources at least this long are chunked; 0 chunks every source |
+| `LADDER` | `360:800k,720:2800k,1080:5000k` | Rungs as short side and bitrate cap, lowest first |
 
 ## Code map
 

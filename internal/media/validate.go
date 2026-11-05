@@ -136,6 +136,7 @@ type stream struct {
 	Index        int    `json:"index"`
 	CodecType    string `json:"codec_type"`
 	CodecName    string `json:"codec_name"`
+	Width        int    `json:"width"`
 	Height       int    `json:"height"`
 	PixFmt       string `json:"pix_fmt"`
 	AvgFrameRate string `json:"avg_frame_rate"`
@@ -176,6 +177,7 @@ func ffprobe(ctx context.Context, path string, entries string) (probeOutput, err
 }
 
 type sourceInfo struct {
+	width    int
 	height   int
 	videoDur float64
 	hasAudio bool
@@ -183,10 +185,14 @@ type sourceInfo struct {
 	audio    stream // first audio stream, if hasAudio
 }
 
+// short is the source's short side, which picks its rungs. It is the same
+// whichever way the video is rotated.
+func (s sourceInfo) short() int { return min(s.width, s.height) }
+
 // probeSource reads stream metadata only; the source may be many GB.
 func probeSource(ctx context.Context, path string) (sourceInfo, error) {
 	res, err := ffprobe(ctx, path,
-		"stream=index,codec_type,codec_name,profile,channels,height,duration:format=duration")
+		"stream=index,codec_type,codec_name,profile,channels,width,height,duration:format=duration")
 	if _, ok := errors.AsType[*exec.ExitError](err); ok && ctx.Err() == nil {
 		return sourceInfo{}, fmt.Errorf("%w: %w", ErrBadSource, err) // ffprobe ran and rejected the file
 	}
@@ -207,7 +213,7 @@ func probeSource(ctx context.Context, path string) (sourceInfo, error) {
 		switch {
 		case s.CodecType == "video" && !foundVideo:
 			foundVideo = true
-			info.height = s.Height
+			info.width, info.height = s.Width, s.Height
 			info.videoDur = durOf(s)
 		case s.CodecType == "audio" && !info.hasAudio:
 			info.hasAudio = true
@@ -230,7 +236,7 @@ type proxyInfo struct {
 // That demuxes the whole file but decodes nothing, so it stays fast.
 func probeProxy(ctx context.Context, path string) (proxyInfo, error) {
 	res, err := ffprobe(ctx, path,
-		"stream=index,codec_type,codec_name,height,pix_fmt,avg_frame_rate"+
+		"stream=index,codec_type,codec_name,width,height,pix_fmt,avg_frame_rate"+
 			":packet=stream_index,pts_time,duration_time,flags")
 	if err != nil {
 		return proxyInfo{}, err

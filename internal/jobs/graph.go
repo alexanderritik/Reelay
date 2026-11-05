@@ -109,7 +109,7 @@ func (s *Store) Plan(ctx context.Context, rootID string, fence int64, chunks []C
 // each child decrements pending_deps exactly once. The commit that reaches
 // zero moves the root from waiting to queued with fresh attempts, ready for
 // its finalize step. A stale worker gets ErrLeaseLost and changes nothing.
-func (s *Store) CommitChild(ctx context.Context, id string, fence int64, outputKey string, media hls.Media) error {
+func (s *Store) CommitChild(ctx context.Context, id string, fence int64, outputKey string, out hls.Output) error {
 	return pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		var parentID string
 		err := tx.QueryRow(ctx, `
@@ -123,7 +123,7 @@ func (s *Store) CommitChild(ctx context.Context, id string, fence int64, outputK
 			    updated_at       = now()
 			WHERE id = $1 AND fence = $2 AND state = 'validating' AND kind <> 'proxy'
 			RETURNING parent_id`,
-			id, fence, outputKey, media).Scan(&parentID)
+			id, fence, outputKey, out).Scan(&parentID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrLeaseLost
 		}

@@ -7,9 +7,11 @@ package worker
 // live in jobs/graph.go; this file only does the work for each step.
 //
 // Storage layout, with the fence in every path so a stale worker and the
-// current owner never write the same files:
+// current owner never write the same files. A chunk's rungs all live under
+// its own prefix, so one fenced commit publishes them together and one
+// DeletePrefix removes an uncommitted attempt:
 //
-//	proxies/<root>/v/<chunk>/<fence>/index.m3u8, init.mp4, seg_NNN.m4s
+//	proxies/<root>/v/<chunk>/<fence>/<rung>/index.m3u8, init.mp4, seg_NNN.m4s
 //	proxies/<root>/a/<fence>/index.m3u8, init.mp4, seg_NNN.m4s
 
 import (
@@ -88,13 +90,13 @@ func (w *Worker) processChunk(ctx context.Context, log *slog.Logger, job jobs.Jo
 	defer stopProgress()
 
 	return w.rendition(ctx, log, job, prefix,
-		func(src, out string) (hls.Media, error) {
+		func(src, out string) (hls.Output, error) {
 			log.Info("transcoding chunk", "start", start, "end", end, "frames", frames)
 			return media.TranscodeChunk(ctx, src, out, w.Proxy, start, end,
 				func(n int) { onProgress(time.Duration(n)) })
 		},
-		func(src, playlist string) error {
-			return media.ValidateChunk(ctx, src, playlist, w.Proxy, start, end, frames)
+		func(src string, stored media.ChunkOutput) error {
+			return media.ValidateChunk(ctx, src, stored, w.Proxy, start, end, frames)
 		})
 }
 
@@ -102,12 +104,13 @@ func (w *Worker) processChunk(ctx context.Context, log *slog.Logger, job jobs.Jo
 func (w *Worker) processAudio(ctx context.Context, log *slog.Logger, job jobs.Job) (result, error) {
 	prefix := fmt.Sprintf("proxies/%s/a/%d", *job.ParentID, job.Fence)
 	return w.rendition(ctx, log, job, prefix,
-		func(src, out string) (hls.Media, error) {
+		func(src, out string) (hls.Output, error) {
 			log.Info("transcoding audio")
-			return media.TranscodeAudio(ctx, src, out)
+			m, err := media.TranscodeAudio(ctx, src, out)
+			return hls.Output{Media: m}, err
 		},
-		func(src, playlist string) error {
-			return media.ValidateAudio(ctx, src, playlist)
+		func(src string, stored media.ChunkOutput) error {
+			return media.ValidateAudio(ctx, src, filepath.Join(stored.Dir, media.PlaylistName))
 		})
 }
 
@@ -115,7 +118,7 @@ func (w *Worker) processAudio(ctx context.Context, log *slog.Logger, job jobs.Jo
 // work dir, store every file under prefix, move to validating, validate what
 // is actually stored, and hand back a fenced CommitChild.
 func (w *Worker) rendition(ctx context.Context, log *slog.Logger, job jobs.Job, prefix string,
-	encode func(src, out string) (hls.Media, error), validate func(src, playlist string) error,
+	encode func(src, out string) (hls.Output, error), validate func(src string, stored media.ChunkOutput) error,
 ) (result, error) {
 	dir, err := w.workDir(job)
 	if err != nil {
@@ -132,7 +135,7 @@ func (w *Worker) rendition(ctx context.Context, log *slog.Logger, job jobs.Job, 
 		return result{}, err
 	}
 	began := time.Now()
-	m, err := encode(src, out)
+	o, err := encode(src, out)
 	if err != nil {
 		return result{}, err
 	}
@@ -141,33 +144,45 @@ func (w *Worker) rendition(ctx context.Context, log *slog.Logger, job jobs.Job, 
 		output:  prefix,
 		discard: func(ctx context.Context) error { return w.Storage.DeletePrefix(ctx, prefix) },
 	}
+	files := media.OutputFiles(o)
 	var bytes int64
-	for _, f := range media.Files(m) {
-		n, err := putFile(ctx, w.Storage, path.Join(prefix, f), filepath.Join(out, f))
+	for _, f := range files {
+		n, err := putFile(ctx, w.Storage, path.Join(prefix, f), filepath.Join(out, filepath.FromSlash(f)))
 		if err != nil {
 			return res, fmt.Errorf("store %s: %w", f, err)
 		}
 		bytes += n
 	}
-	log.Info("rendition written", "prefix", prefix, "segments", len(m.Segments), "bytes", bytes,
-		"took", time.Since(began).Round(time.Millisecond))
-	if err := w.chaosAfterStore(ctx, log, path.Join(prefix, m.Segments[0].URI), dir); err != nil {
+	log.Info("rendition written", "prefix", prefix, "rungs", len(o.Renditions), "files", len(files),
+		"bytes", bytes, "took", time.Since(began).Round(time.Millisecond))
+	if err := w.chaosAfterStore(ctx, log, path.Join(prefix, chaosTarget(o)), dir); err != nil {
 		return res, err
 	}
 
 	if err := w.Jobs.MarkValidating(ctx, job.ID, job.Fence); err != nil {
 		return res, err
 	}
-	playlist, err := fetchRendition(ctx, w.Storage, prefix, m, filepath.Join(dir, "stored"))
+	stored, err := fetchOutput(ctx, w.Storage, prefix, o, filepath.Join(dir, "stored"))
 	if err != nil {
 		return res, fmt.Errorf("fetch stored rendition: %w", err)
 	}
-	if err := validate(src, playlist); err != nil {
+	if err := validate(src, stored); err != nil {
 		return res, err
 	}
 	log.Info("rendition valid", "prefix", prefix)
-	res.commit = func(ctx context.Context) error { return w.Jobs.CommitChild(ctx, job.ID, job.Fence, prefix, m) }
+	res.commit = func(ctx context.Context) error { return w.Jobs.CommitChild(ctx, job.ID, job.Fence, prefix, o) }
 	return res, nil
+}
+
+// chaosTarget is the file the truncate fault cuts short: the first segment
+// of the top rung, so the fault hits one rung and validation must catch it
+// there, or the audio's first segment.
+func chaosTarget(o hls.Output) string {
+	if n := len(o.Renditions); n > 0 {
+		top := o.Renditions[n-1]
+		return top.Name + "/" + top.Segments[0].URI
+	}
+	return o.Segments[0].URI
 }
 
 // finalize runs on the root once every child has committed: it validates the
@@ -185,7 +200,7 @@ func (w *Worker) finalize(ctx context.Context, log *slog.Logger, job jobs.Job) (
 	if err != nil {
 		return result{}, err
 	}
-	var playlists []string
+	var chunks []media.ChunkOutput
 	for _, k := range kids {
 		if k.State != jobs.StateDone || k.OutputKey == nil || k.HLS == nil {
 			return result{}, fmt.Errorf("child %s is %s, want done", k.ID, k.State)
@@ -193,12 +208,12 @@ func (w *Worker) finalize(ctx context.Context, log *slog.Logger, job jobs.Job) (
 		if k.Kind != jobs.KindChunk {
 			continue // audio was checked against the source before it committed
 		}
-		pl, err := fetchRendition(ctx, w.Storage, *k.OutputKey, *k.HLS,
+		c, err := fetchOutput(ctx, w.Storage, *k.OutputKey, *k.HLS,
 			filepath.Join(dir, fmt.Sprint(*k.ChunkIndex)))
 		if err != nil {
 			return result{}, fmt.Errorf("fetch chunk %d: %w", *k.ChunkIndex, err)
 		}
-		playlists = append(playlists, pl)
+		chunks = append(chunks, c)
 	}
 
 	src, err := storage.LocalFile(ctx, w.Storage, job.SourceKey, dir)
@@ -214,8 +229,8 @@ func (w *Worker) finalize(ctx context.Context, log *slog.Logger, job jobs.Job) (
 		return result{}, err
 	}
 	w.chaosCrash(log, ChaosCrashDuringFinalize)
-	log.Info("validating assembled proxy", "chunks", len(playlists))
-	if err := media.ValidateAssembly(ctx, src, playlists, w.Proxy, len(frames)); err != nil {
+	log.Info("validating assembled proxy", "chunks", len(chunks))
+	if err := media.ValidateAssembly(ctx, src, chunks, w.Proxy, len(frames)); err != nil {
 		if _, ok := errors.AsType[*media.InvalidError](err); ok {
 			return result{}, fmt.Errorf("%w: %w", errPermanent, err)
 		}
@@ -249,22 +264,24 @@ func (w *Worker) workDir(job jobs.Job) (string, error) {
 	return dir, nil
 }
 
-// fetchRendition makes a stored rendition readable by ffprobe and returns
-// its playlist's local path. Local storage is read in place; other storage
-// is downloaded into dir (segment names are flat, so they stay relative).
-func fetchRendition(ctx context.Context, s storage.Storage, prefix string, m hls.Media, dir string) (string, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	var playlist string
-	for _, f := range media.Files(m) {
-		p, err := storage.LocalFile(ctx, s, path.Join(prefix, f), dir)
+// fetchOutput makes a child's stored output readable by ffprobe and returns
+// where it is on local disk. Local storage is read in place; other storage
+// is downloaded into dir, keeping each rendition's subdirectory.
+func fetchOutput(ctx context.Context, s storage.Storage, prefix string, o hls.Output, dir string) (media.ChunkOutput, error) {
+	root := ""
+	for _, f := range media.OutputFiles(o) {
+		local := filepath.FromSlash(f)
+		sub := filepath.Join(dir, filepath.Dir(local))
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			return media.ChunkOutput{}, err
+		}
+		p, err := storage.LocalFile(ctx, s, path.Join(prefix, f), sub)
 		if err != nil {
-			return "", err
+			return media.ChunkOutput{}, err
 		}
-		if f == media.PlaylistName {
-			playlist = p
+		if root == "" {
+			root = strings.TrimSuffix(p, local)
 		}
 	}
-	return playlist, nil
+	return media.ChunkOutput{Dir: root, HLS: o}, nil
 }

@@ -12,17 +12,83 @@ import (
 	"strings"
 )
 
-// Media is what one chunk or audio job published: an init segment and the
-// media segments that follow it, as paths relative to the job's output
-// directory. Stored on the job row when it commits.
+// Media is one HLS rendition as published: an init segment and the media
+// segments that follow it, as paths relative to its directory.
 type Media struct {
-	Init     string    `json:"init"`
-	Segments []Segment `json:"segments"`
+	Init     string    `json:"init,omitempty"`
+	Segments []Segment `json:"segments,omitempty"`
 }
 
 type Segment struct {
 	URI      string  `json:"uri"`
-	Duration float64 `json:"duration"` // seconds
+	Duration float64 `json:"duration"`        // seconds
+	Bytes    int64   `json:"bytes,omitempty"` // size on disk; 0 if unknown
+}
+
+// Output is what one child job published, stored on its row when it
+// commits. A video chunk publishes one Rendition per rung of the quality
+// ladder, each in a subdirectory of the job's output key named after it.
+// Audio publishes a single Media at the output key itself, and so did video
+// chunks committed before the ladder existed.
+type Output struct {
+	Media
+	Renditions []Rendition `json:"renditions,omitempty"`
+}
+
+// Rendition is one rung of a video chunk's ladder: its media, and what a
+// player needs to choose it.
+type Rendition struct {
+	Name    string `json:"name"` // e.g. "720p": its directory and playlist name
+	Width   int    `json:"width"`
+	Height  int    `json:"height"`
+	Codecs  string `json:"codecs"`   // RFC 6381 video codec, e.g. avc1.640028
+	MaxRate int    `json:"max_rate"` // the encoder's bitrate cap, bits/s
+	Media
+}
+
+// Video returns the video renditions in o, lowest first. A chunk from
+// before the ladder counts as one unnamed rendition at the output key.
+func (o Output) Video() []Rendition {
+	if len(o.Renditions) > 0 || o.Init == "" {
+		return o.Renditions
+	}
+	return []Rendition{{Codecs: VideoCodec, Media: o.Media}}
+}
+
+// PlaylistURI is the media playlist a master playlist lists for the named
+// rendition, next to the master so segment paths resolve the same way.
+func PlaylistURI(name string) string {
+	if name == "" {
+		return "video.m3u8"
+	}
+	return "video_" + name + ".m3u8"
+}
+
+// Bitrates returns the peak and average bitrate of the given media in
+// bits/s, from recorded segment sizes; zero when sizes are unknown.
+// Segments under a second are left out of the peak: a chunk's last segment
+// can be a few frames long, and a few frames' size over a tiny duration
+// says nothing about the rate a player has to sustain.
+func Bitrates(media []Media) (peak, avg int) {
+	var bytes int64
+	var dur float64
+	for _, m := range media {
+		for _, s := range m.Segments {
+			if s.Bytes <= 0 || s.Duration <= 0 {
+				continue
+			}
+			bytes += s.Bytes
+			dur += s.Duration
+			if s.Duration >= 1 {
+				peak = max(peak, int(float64(s.Bytes*8)/s.Duration))
+			}
+		}
+	}
+	if dur == 0 {
+		return 0, 0
+	}
+	avg = int(float64(bytes*8) / dur)
+	return max(peak, avg), avg
 }
 
 // Duration is the total length of the segments.
@@ -128,27 +194,46 @@ func AudioPlaylist(p Part) string {
 }
 
 // Codecs advertised in the master playlist. The chunk encoder pins the H.264
-// profile and level so this string is exact.
+// profile and level so these strings are exact.
 const (
-	VideoCodec = "avc1.640028" // H.264 High, level 4.0
+	VideoCodec = "avc1.640028" // H.264 High, level 4.0; chunks from before the ladder
 	AudioCodec = "mp4a.40.2"   // AAC-LC
 )
 
-// MasterPlaylist points a player at the video rendition and, if the source
-// has audio, the audio rendition. bandwidth is a peak estimate in bits/s.
-// RESOLUTION is optional in HLS and left out: there is one rendition, so a
-// player has nothing to choose between.
-func MasterPlaylist(bandwidth int, hasAudio bool) string {
+// Variant is one entry of the master playlist: a video rendition a player
+// may switch to.
+type Variant struct {
+	URI              string
+	Bandwidth        int // peak bits/s, audio included
+	AverageBandwidth int // 0 leaves it out
+	Width, Height    int // 0 leaves RESOLUTION out
+	Codecs           string
+}
+
+// MasterPlaylist lists the video variants, lowest first, and, if the source
+// has audio, the one audio rendition they all share.
+func MasterPlaylist(variants []Variant, hasAudio bool) string {
 	var b strings.Builder
 	b.WriteString("#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n")
-	codecs := VideoCodec
 	audio := ""
 	if hasAudio {
 		b.WriteString(`#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="audio",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"` + "\n")
-		codecs += "," + AudioCodec
 		audio = `,AUDIO="audio"`
 	}
-	fmt.Fprintf(&b, "#EXT-X-STREAM-INF:BANDWIDTH=%d,CODECS=%q%s\nvideo.m3u8\n", bandwidth, codecs, audio)
+	for _, v := range variants {
+		codecs := v.Codecs
+		if hasAudio {
+			codecs += "," + AudioCodec
+		}
+		fmt.Fprintf(&b, "#EXT-X-STREAM-INF:BANDWIDTH=%d", v.Bandwidth)
+		if v.AverageBandwidth > 0 {
+			fmt.Fprintf(&b, ",AVERAGE-BANDWIDTH=%d", v.AverageBandwidth)
+		}
+		if v.Width > 0 && v.Height > 0 {
+			fmt.Fprintf(&b, ",RESOLUTION=%dx%d", v.Width, v.Height)
+		}
+		fmt.Fprintf(&b, ",CODECS=%q%s\n%s\n", codecs, audio, v.URI)
+	}
 	return b.String()
 }
 

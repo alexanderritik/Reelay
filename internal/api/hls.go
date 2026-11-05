@@ -6,10 +6,11 @@ package api
 // segment appears only after its fenced commit. At high request rates this
 // is the part to cache.
 //
-//	GET /jobs/{id}/hls/master.m3u8   video + audio renditions
-//	GET /jobs/{id}/hls/video.m3u8    EVENT playlist, grows as chunks commit
-//	GET /jobs/{id}/hls/audio.m3u8    the audio rendition
-//	GET /jobs/{id}/hls/{file...}     init and media segments
+//	GET /jobs/{id}/hls/master.m3u8         one variant per rung, plus audio
+//	GET /jobs/{id}/hls/video_{rung}.m3u8   EVENT playlist for one rung, grows as chunks commit
+//	GET /jobs/{id}/hls/video.m3u8          the top rung (and chunks from before the ladder)
+//	GET /jobs/{id}/hls/audio.m3u8          the audio rendition
+//	GET /jobs/{id}/hls/{file...}           init and media segments
 
 import (
 	"errors"
@@ -26,10 +27,13 @@ import (
 	"github.com/alexanderritik/reelay/internal/jobs"
 )
 
-// masterBandwidth is the peak bitrate advertised for the one rendition. A
-// 540p CRF 23 proxy plus 128k audio stays well under it; with a single
-// rendition a player only uses it to size its buffer.
-const masterBandwidth = 3_000_000
+// legacyBandwidth is advertised for a video from before the ladder, whose
+// one 540p rendition has no recorded segment sizes.
+const legacyBandwidth = 3_000_000
+
+// audioBandwidth is assumed for audio whose segment sizes are unknown: the
+// 128 kbit/s it is encoded at, plus container overhead.
+const audioBandwidth = 160_000
 
 // graph is a chunked job as the playlists see it.
 type graph struct {
@@ -38,16 +42,30 @@ type graph struct {
 	audio  *jobs.Job
 }
 
-// playable is the run of committed chunks from chunk 0, stopping at the
-// first one not yet done. It only ever grows, because done is final, which
-// is exactly what an EVENT playlist allows.
-func (g graph) playable() []hls.Part {
+// renditions are the video rungs a player may choose from, lowest first:
+// those chunk 0 published. Every chunk of a video publishes the same rungs
+// (finalize checks it), so chunk 0 speaks for the rest.
+func (g graph) renditions() []hls.Rendition {
+	if len(g.chunks) == 0 || g.chunks[0].State != jobs.StateDone || g.chunks[0].HLS == nil {
+		return nil
+	}
+	return g.chunks[0].HLS.Video()
+}
+
+// playable is one rung's run of committed chunks from chunk 0, stopping at
+// the first one not yet done. It only ever grows, because done is final,
+// which is exactly what an EVENT playlist allows.
+func (g graph) playable(rung string) []hls.Part {
 	var parts []hls.Part
 	for _, c := range g.chunks {
-		if c.State != jobs.StateDone {
+		if c.State != jobs.StateDone || c.HLS == nil {
 			break
 		}
-		parts = append(parts, part(g.root.ID, c))
+		p, ok := part(g.root.ID, c, rung)
+		if !ok {
+			break
+		}
+		parts = append(parts, p)
 	}
 	return parts
 }
@@ -57,14 +75,64 @@ func (g graph) ready() bool {
 	if g.audio != nil && g.audio.State != jobs.StateDone {
 		return false
 	}
-	return len(g.playable()) > 0
+	return len(g.renditions()) > 0
 }
 
-func part(rootID string, child jobs.Job) hls.Part {
+// part is the named rung of a committed chunk, with its directory relative
+// to the job's prefix.
+func part(rootID string, child jobs.Job, rung string) (hls.Part, bool) {
+	dir := strings.TrimPrefix(*child.OutputKey, "proxies/"+rootID+"/")
+	for _, r := range child.HLS.Video() {
+		if r.Name == rung {
+			if rung != "" {
+				dir += "/" + rung
+			}
+			return hls.Part{Dir: dir, Media: r.Media}, true
+		}
+	}
+	return hls.Part{}, false
+}
+
+func audioPart(rootID string, child jobs.Job) hls.Part {
 	return hls.Part{
 		Dir:   strings.TrimPrefix(*child.OutputKey, "proxies/"+rootID+"/"),
-		Media: *child.HLS,
+		Media: child.HLS.Media,
 	}
+}
+
+// variants describes each rung for the master playlist. BANDWIDTH is the peak
+// a player must sustain: the higher of the peak measured over the chunks so
+// far and the rung's encoder cap (which holds for chunks not yet encoded),
+// plus the audio's. AVERAGE-BANDWIDTH is measured, so it firms up as chunks
+// come in.
+func (g graph) variants() []hls.Variant {
+	aPeak, aAvg := 0, 0
+	if g.audio != nil {
+		aPeak, aAvg = hls.Bitrates([]hls.Media{g.audio.HLS.Media})
+		if aPeak == 0 {
+			aPeak, aAvg = audioBandwidth, audioBandwidth
+		}
+	}
+	var out []hls.Variant
+	for _, r := range g.renditions() {
+		var media []hls.Media
+		for _, p := range g.playable(r.Name) {
+			media = append(media, p.Media)
+		}
+		peak, avg := hls.Bitrates(media)
+		v := hls.Variant{
+			URI: hls.PlaylistURI(r.Name), Width: r.Width, Height: r.Height, Codecs: r.Codecs,
+			Bandwidth: max(peak, r.MaxRate) + aPeak,
+		}
+		if avg > 0 {
+			v.AverageBandwidth = avg + aAvg
+		}
+		if peak == 0 && r.MaxRate == 0 {
+			v.Bandwidth = legacyBandwidth
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // loadGraph fetches a chunked job and its children, writing the error
@@ -130,15 +198,43 @@ func (s *Server) masterPlaylist(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writePlaylist(w, hls.MasterPlaylist(masterBandwidth, g.audio != nil), false)
+	// Bandwidth figures are measured from the chunks so far, so a player
+	// that refetches it mid-encode gets fresher ones.
+	writePlaylist(w, hls.MasterPlaylist(g.variants(), g.audio != nil), len(g.playable(g.top())) < len(g.chunks))
 }
 
+// top is the highest rung's name: what video.m3u8 serves.
+func (g graph) top() string {
+	rs := g.renditions()
+	return rs[len(rs)-1].Name
+}
+
+// videoPlaylist serves video.m3u8, the top rung.
 func (s *Server) videoPlaylist(w http.ResponseWriter, r *http.Request) {
 	g, ok := s.loadGraph(w, r)
 	if !ok {
 		return
 	}
-	parts := g.playable()
+	s.writeRung(w, g, g.top())
+}
+
+// rungPlaylist serves video_{rung}.m3u8.
+func (s *Server) rungPlaylist(w http.ResponseWriter, r *http.Request, rung string) {
+	g, ok := s.loadGraph(w, r)
+	if !ok {
+		return
+	}
+	for _, rd := range g.renditions() {
+		if rd.Name == rung && rung != "" {
+			s.writeRung(w, g, rung)
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "no such rendition")
+}
+
+func (s *Server) writeRung(w http.ResponseWriter, g graph, rung string) {
+	parts := g.playable(rung)
 	ended := len(parts) == len(g.chunks)
 	// While it grows, the player must refetch it; once ended it is final.
 	writePlaylist(w, hls.VideoPlaylist(parts, ended), !ended)
@@ -153,7 +249,7 @@ func (s *Server) audioPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "source has no audio")
 		return
 	}
-	writePlaylist(w, hls.AudioPlaylist(part(g.root.ID, *g.audio)), false)
+	writePlaylist(w, hls.AudioPlaylist(audioPart(g.root.ID, *g.audio)), false)
 }
 
 func writePlaylist(w http.ResponseWriter, body string, live bool) {
@@ -174,6 +270,12 @@ var segmentTypes = map[string]string{
 // so segments can be cached forever.
 func (s *Server) segment(w http.ResponseWriter, r *http.Request) {
 	id, file := r.PathValue("id"), r.PathValue("file")
+	if rung, ok := strings.CutPrefix(file, "video_"); ok && !strings.Contains(file, "/") {
+		if rung, ok := strings.CutSuffix(rung, ".m3u8"); ok {
+			s.rungPlaylist(w, r, rung)
+			return
+		}
+	}
 	ctype, ok := segmentTypes[path.Ext(file)]
 	if uuid.Validate(id) != nil || !ok || !filepath.IsLocal(file) {
 		writeError(w, http.StatusNotFound, "not found")

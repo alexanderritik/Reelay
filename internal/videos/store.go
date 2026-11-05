@@ -73,8 +73,9 @@ type row struct {
 	Children      int
 	ChildrenDone  int
 	ChildProgress float64
-	FirstChunkOK  bool // chunk 0 committed
-	AudioOK       bool // audio committed, or the source has none
+	FirstChunkOK  bool     // chunk 0 committed
+	AudioOK       bool     // audio committed, or the source has none
+	Renditions    []string // rung names chunk 0 published, lowest first
 }
 
 // selectRows reads root jobs. A root without a videos row (an upload made
@@ -84,7 +85,7 @@ const selectRows = `
 	SELECT j.id, COALESCE(v.title, ''), COALESCE(v.filename, ''), COALESCE(v.size_bytes, 0),
 	       v.duration_seconds, v.source_height,
 	       j.state, j.progress, j.last_error, j.attempts, j.chunks, j.output_key, j.created_at, j.updated_at,
-	       c.total, c.done, c.progress, c.first_ok, c.audio_ok
+	       c.total, c.done, c.progress, c.first_ok, c.audio_ok, COALESCE(c.renditions, '[]'::jsonb)
 	FROM jobs j
 	LEFT JOIN videos v ON v.id = j.id
 	LEFT JOIN LATERAL (
@@ -92,7 +93,10 @@ const selectRows = `
 		       count(*) FILTER (WHERE k.state = 'done')         AS done,
 		       COALESCE(avg(k.progress), 0)                     AS progress,
 		       COALESCE(bool_or(k.kind = 'chunk' AND k.chunk_index = 0 AND k.state = 'done'), false) AS first_ok,
-		       COALESCE(bool_and(k.state = 'done') FILTER (WHERE k.kind = 'audio'), true)           AS audio_ok
+		       COALESCE(bool_and(k.state = 'done') FILTER (WHERE k.kind = 'audio'), true)           AS audio_ok,
+		       -- Only the rung names, not chunk 0's whole segment list.
+		       (array_agg(jsonb_path_query_array(k.hls, '$.renditions[*].name'))
+		            FILTER (WHERE k.kind = 'chunk' AND k.chunk_index = 0 AND k.state = 'done'))[1]   AS renditions
 		FROM jobs k WHERE k.parent_id = j.id
 	) c ON true
 	WHERE j.kind = 'proxy'`
@@ -101,7 +105,7 @@ func scanRow(r pgx.Row) (row, error) {
 	var v row
 	err := r.Scan(&v.ID, &v.Title, &v.Filename, &v.SizeBytes, &v.Duration, &v.SourceHeight,
 		&v.State, &v.Progress, &v.LastError, &v.Attempts, &v.Chunks, &v.OutputKey, &v.CreatedAt, &v.UpdatedAt,
-		&v.Children, &v.ChildrenDone, &v.ChildProgress, &v.FirstChunkOK, &v.AudioOK)
+		&v.Children, &v.ChildrenDone, &v.ChildProgress, &v.FirstChunkOK, &v.AudioOK, &v.Renditions)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return row{}, ErrNotFound
 	}

@@ -525,7 +525,9 @@ func setup(ctx context.Context) (*harness, error) {
 	if err := db.Migrate(ctx, h.pool); err != nil {
 		return nil, err
 	}
-	if _, err := h.pool.Exec(ctx, `TRUNCATE jobs`); err != nil {
+	// CASCADE: the serve this harness starts adds the product's videos table,
+	// which references jobs.
+	if _, err := h.pool.Exec(ctx, `TRUNCATE jobs CASCADE`); err != nil {
 		return nil, err
 	}
 	h.jobs = jobs.NewStore(h.pool)
