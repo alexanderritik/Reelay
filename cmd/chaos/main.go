@@ -672,6 +672,10 @@ func (h *harness) start(name, command string, env ...string) *proc {
 		"LEASE_TTL="+leaseTTL,
 		"REAP_INTERVAL=1s",
 		"POLL_INTERVAL=200ms",
+		// The product chunks every source by default. Most scenarios test the
+		// single-file path, so keep short sources on it here; chunk workers
+		// override this (chunkWorkerEnv), and the last value of a key wins.
+		"CHUNK_MIN_DURATION=2m",
 	)
 	cmd.Env = append(cmd.Env, env...)
 	logFile, _ := os.Create(filepath.Join(h.dir, "logs", name+".log"))

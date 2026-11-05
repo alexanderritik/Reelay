@@ -48,7 +48,7 @@ queued ──claim──▶ running ──▶ validating ──commit──▶ d
 
 ## Chunked proxies
 
-Sources at least `CHUNK_MIN_DURATION` long (default 2 minutes) are split into chunks of `CHUNK_SECONDS` (default 10 s). Shorter sources take the single-file path described above, unchanged.
+Sources at least `CHUNK_MIN_DURATION` long are split into chunks of `CHUNK_SECONDS` (default 10 s). The default is 0, so every source is chunked: one shorter than a chunk becomes a single chunk, and every video plays as HLS. Set it higher to send shorter sources down the single-file path described above; the chaos suite does this (2 minutes) so its single-file scenarios keep running.
 
 ```
 upload's job (root)
@@ -162,7 +162,7 @@ Worker settings (environment variables):
 | `REAP_INTERVAL` | 5s | How often the reaper checks for expired leases |
 | `POLL_INTERVAL` | 1s | How often an idle worker looks for jobs |
 | `CHUNK_SECONDS` | 10s | Chunk length (a multiple of the 1 s keyframe interval) |
-| `CHUNK_MIN_DURATION` | 2m | Sources at least this long are chunked |
+| `CHUNK_MIN_DURATION` | 0 | Sources at least this long are chunked; 0 chunks every source |
 
 ## Code map
 

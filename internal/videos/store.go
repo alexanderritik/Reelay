@@ -131,17 +131,16 @@ func (v row) progress() float64 {
 	return min(99, v.ChildProgress)
 }
 
-// playback reports how the video plays (HLS once planned into chunks, MP4
-// for the single-file path) and whether a player can start on it yet, which
-// for HLS can be long before it is ready.
+// playback reports how the video plays (HLS, once planned into chunks) and
+// whether a player can start on it yet, which can be long before it is ready.
+// Every upload is chunked, so there is no other format; a root that took the
+// engine's single-file path (a worker run with CHUNK_MIN_DURATION set) has no
+// playback through the product API.
 func (v row) playback() (format string, playable bool) {
-	switch {
-	case v.Chunks != nil:
-		return "hls", v.State != jobs.StateFailed && v.FirstChunkOK && v.AudioOK
-	case v.State == jobs.StateDone:
-		return "mp4", true
+	if v.Chunks == nil {
+		return "", false
 	}
-	return "", false
+	return "hls", v.State != jobs.StateFailed && v.FirstChunkOK && v.AudioOK
 }
 
 // Meta is what the API records about an upload besides its job.

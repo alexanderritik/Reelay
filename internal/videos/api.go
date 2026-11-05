@@ -9,8 +9,7 @@ package videos
 //	PATCH  /videos/{id}               {"title": "..."}
 //	DELETE /videos/{id}               a ready or failed video
 //	GET    /videos/{id}/thumbnail.jpg poster frame, made from the source on first request
-//	GET    /videos/{id}/video.mp4     short videos (single-file path)
-//	GET    /videos/{id}/hls/…         long videos: HLS, playable while processing
+//	GET    /videos/{id}/hls/…         HLS playback, playable while processing
 
 import (
 	"context"
@@ -21,7 +20,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -64,7 +62,7 @@ type Video struct {
 	Status       Status    `json:"status"`
 	Progress     float64   `json:"progress"`
 	Playable     bool      `json:"playable"`         // play_url works now, possibly before ready
-	Format       string    `json:"format,omitempty"` // hls or mp4, once known
+	Format       string    `json:"format,omitempty"` // "hls", once planned
 	PlayURL      string    `json:"play_url,omitempty"`
 	ThumbnailURL string    `json:"thumbnail_url"`
 	EmbedURL     string    `json:"embed_url"`
@@ -97,7 +95,6 @@ func (s *Server) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /videos/{id}", s.rename)
 	mux.HandleFunc("DELETE /videos/{id}", s.delete)
 	mux.HandleFunc("GET /videos/{id}/thumbnail.jpg", s.thumbnail)
-	mux.HandleFunc("GET /videos/{id}/video.mp4", s.mp4)
 	s.Engine.MountHLS(mux, "/videos")
 }
 
@@ -120,11 +117,8 @@ func (s *Server) view(r *http.Request, v row) Video {
 	if out.Status != StatusFailed {
 		out.Error = nil // last_error of an attempt that was retried and recovered
 	}
-	switch format {
-	case "hls":
+	if format == "hls" {
 		out.PlayURL = base + "/hls/master.m3u8"
-	case "mp4":
-		out.PlayURL = base + "/video.mp4"
 	}
 	return out
 }
@@ -447,34 +441,6 @@ func (s *Server) makeThumbnail(ctx context.Context, id string) error {
 	defer f.Close()
 	_, err = s.Storage.Put(ctx, thumbnailKey(id), f)
 	return err
-}
-
-// mp4 serves a short video's single-file output, with Range support.
-func (s *Server) mp4(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.pathID(w, r)
-	if !ok {
-		return
-	}
-	job, err := s.Jobs.Get(r.Context(), id)
-	if err != nil || job.Kind != jobs.KindProxy || job.State != jobs.StateDone ||
-		job.OutputKey == nil || path.Ext(*job.OutputKey) != ".mp4" {
-		writeError(w, http.StatusNotFound, "no mp4 for this video")
-		return
-	}
-	f, err := s.Storage.Open(r.Context(), *job.OutputKey)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "no mp4 for this video")
-		return
-	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "video/mp4")
-	// The key carries the fence of the commit that wrote it, so it never changes.
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
-	if rs, ok := f.(io.ReadSeeker); ok {
-		http.ServeContent(w, r, "", time.Time{}, rs)
-		return
-	}
-	_, _ = io.Copy(w, f)
 }
 
 func (s *Server) pathID(w http.ResponseWriter, r *http.Request) (string, bool) {

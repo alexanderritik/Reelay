@@ -99,8 +99,11 @@ func runWorker(ctx context.Context, log *slog.Logger) error {
 		Chaos:        os.Getenv("CONDUIT_CHAOS"),
 		Log:          log,
 		// Sources this long or longer are split into chunks (worker/chunked.go).
+		// The product chunks everything (0), so every video plays as HLS; a
+		// higher value sends shorter sources down the single-file MP4 path,
+		// which the chaos suite still exercises.
 		ChunkSeconds:     durationEnv("CHUNK_SECONDS", "10s", &cfgErr),
-		ChunkMinDuration: durationEnv("CHUNK_MIN_DURATION", "2m", &cfgErr),
+		ChunkMinDuration: durationEnvAllowZero("CHUNK_MIN_DURATION", "0s", &cfgErr),
 	}
 	if cfgErr != nil {
 		return cfgErr
@@ -118,10 +121,24 @@ func runWorker(ctx context.Context, log *slog.Logger) error {
 	return w.Run(ctx)
 }
 
-// durationEnv parses a duration setting, recording the first bad value in *errp.
+// durationEnv parses a duration setting that must be positive, recording the
+// first bad value in *errp.
 func durationEnv(key, fallback string, errp *error) time.Duration {
+	return parseDurationEnv(key, fallback, false, errp)
+}
+
+// durationEnvAllowZero is durationEnv for settings where 0 is meaningful.
+func durationEnvAllowZero(key, fallback string, errp *error) time.Duration {
+	return parseDurationEnv(key, fallback, true, errp)
+}
+
+func parseDurationEnv(key, fallback string, allowZero bool, errp *error) time.Duration {
 	d, err := time.ParseDuration(env(key, fallback))
-	if err == nil && d <= 0 {
+	switch {
+	case err != nil:
+	case d < 0:
+		err = errors.New("must not be negative")
+	case d == 0 && !allowZero:
 		err = errors.New("must be positive")
 	}
 	if err != nil && *errp == nil {

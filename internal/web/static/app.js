@@ -441,7 +441,6 @@ function detailView(id) {
     if (!v.playable || attached === v.play_url) return;
     attached = v.play_url;
     video.poster = v.thumbnail_url;
-    if (v.format === "mp4") { video.src = v.play_url; return; }
     if (window.Hls && Hls.isSupported()) {
       // While processing the playlist grows, which hls.js treats as live and
       // would start at the end; start at the beginning instead.
@@ -539,9 +538,7 @@ function detailView(id) {
 
   function snippets(v) {
     const iframe = `<iframe src="${v.embed_url}" width="640" height="360"\n  frameborder="0" allow="autoplay; fullscreen" allowfullscreen></iframe>`;
-    const html = v.format === "mp4"
-      ? `<video controls playsinline poster="${v.thumbnail_url}"\n  src="${v.play_url}"></video>`
-      : `<video id="player" controls playsinline\n  poster="${v.thumbnail_url}"></video>\n<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>\n<script>\n  const video = document.getElementById("player");\n  const src = "${v.play_url}";\n  if (video.canPlayType("application/vnd.apple.mpegurl")) video.src = src;\n  else { const hls = new Hls(); hls.loadSource(src); hls.attachMedia(video); }\n</script>`;
+    const html = `<video id="player" controls playsinline\n  poster="${v.thumbnail_url}"></video>\n<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13"></script>\n<script>\n  const video = document.getElementById("player");\n  const src = "${v.play_url}";\n  if (video.canPlayType("application/vnd.apple.mpegurl")) video.src = src;\n  else { const hls = new Hls(); hls.loadSource(src); hls.attachMedia(video); }\n</script>`;
     const sh = `curl ${ORIGIN}/videos/${v.id}`;
     return { embed: [iframe, "html"], html: [html, "html"], api: [sh, "sh"] };
   }
@@ -570,7 +567,7 @@ function detailView(id) {
       ["Duration", fmtDuration(v.duration) || "—"],
       ["Source", [v.source_height ? `${v.source_height}p` : "", fmtBytes(v.size_bytes)].filter(Boolean).join(" · ")],
       ["File", v.filename || "—"],
-      ["Playback", v.format === "hls" ? "HLS (fMP4)" : v.format === "mp4" ? "MP4" : "—"],
+      ["Playback", v.format === "hls" ? "HLS (fMP4)" : "—"],
       ["Uploaded", new Date(v.created_at).toLocaleString()],
       ["Video ID", `<span class="mono" title="${esc(v.id)}">${esc(v.id)}</span>`, true],
     ];

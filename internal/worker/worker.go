@@ -36,8 +36,9 @@ type Worker struct {
 	Chaos        string // fault injection for cmd/chaos; see chaos.go
 	Log          *slog.Logger
 
-	// Chunked path (chunked.go): sources at least ChunkMinDuration long are
-	// split into chunks of ChunkSeconds, a multiple of Proxy.KeyframeInterval.
+	// Chunked path (chunked.go): sources at least ChunkMinDuration long (all
+	// of them when it is 0) are split into chunks of ChunkSeconds, a multiple
+	// of Proxy.KeyframeInterval.
 	ChunkSeconds     time.Duration
 	ChunkMinDuration time.Duration
 }

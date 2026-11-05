@@ -248,3 +248,58 @@ func TestTranscodeAudioEncodesOtherCodecs(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+// Every upload takes the chunked path, so the shortest clips must too: a
+// source shorter than one chunk becomes a single chunk that validates and
+// assembles like any other.
+func TestShortSourcesTakeChunkedPath(t *testing.T) {
+	requireFFmpeg(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name  string
+		input []string // ffmpeg output options that shape the clip
+		audio bool
+	}{
+		{"3 seconds", []string{"-t", "3"}, true},
+		{"1 second", []string{"-t", "1"}, true},
+		{"half a second", []string{"-t", "0.5"}, true},
+		{"single frame", []string{"-frames:v", "1"}, false},
+		{"no audio", []string{"-t", "3"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := filepath.Join(t.TempDir(), "short.mp4")
+			args := []string{"-loglevel", "error", "-y",
+				"-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=30000/1001"}
+			if tc.audio {
+				args = append(args, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-c:a", "aac", "-shortest")
+			}
+			args = append(args, tc.input...)
+			args = append(args, "-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-pix_fmt", "yuv420p", src)
+			if out, err := exec.Command("ffmpeg", args...).CombinedOutput(); err != nil {
+				t.Fatalf("make source: %v: %s", err, out)
+			}
+
+			chunks, playlists, nFrames := encodeChunks(t, src, 10)
+			if len(chunks) != 1 {
+				t.Fatalf("%d chunks, want 1", len(chunks))
+			}
+			c := chunks[0]
+			if err := media.ValidateChunk(ctx, src, playlists[0], media.DefaultProxy, c.Start, c.End, c.Frames); err != nil {
+				t.Errorf("chunk: %v", err)
+			}
+			if err := media.ValidateAssembly(ctx, src, playlists, media.DefaultProxy, nFrames); err != nil {
+				t.Errorf("assembly: %v", err)
+			}
+			if !tc.audio {
+				return
+			}
+			audioDir := t.TempDir()
+			if _, err := media.TranscodeAudio(ctx, src, audioDir); err != nil {
+				t.Fatal(err)
+			}
+			if err := media.ValidateAudio(ctx, src, filepath.Join(audioDir, media.PlaylistName)); err != nil {
+				t.Errorf("audio: %v", err)
+			}
+		})
+	}
+}

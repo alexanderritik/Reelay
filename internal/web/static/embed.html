@@ -36,7 +36,6 @@ let attached = false;
 function attach(v) {
   attached = true;
   video.poster = v.thumbnail_url;
-  if (v.format === "mp4") { video.src = v.play_url; return; }
   if (window.Hls && Hls.isSupported()) {
     const hls = new Hls({ startPosition: 0 });
     hls.loadSource(v.play_url);
