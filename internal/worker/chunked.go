@@ -29,8 +29,10 @@ import (
 	"github.com/alexanderritik/reelay/internal/storage"
 )
 
-// processUpload picks the path for an upload's job: short sources take the
-// single-file path unchanged, long ones are planned into chunks.
+// processUpload picks the path for an upload's job: sources shorter than
+// ChunkMinDuration take the single-file path, the rest are planned into
+// chunks. With ChunkMinDuration 0 (the product default) every source is
+// chunked; one shorter than ChunkSeconds becomes a single chunk.
 func (w *Worker) processUpload(ctx context.Context, log *slog.Logger, job jobs.Job) (result, error) {
 	dir, err := w.workDir(job)
 	if err != nil {
